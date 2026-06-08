@@ -1,6 +1,7 @@
 # PyInstaller build artifacts
 build/
 dist/
+LiveDIC/
 *.spec
 
 # Python cache
