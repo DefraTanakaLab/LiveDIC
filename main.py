@@ -46,6 +46,7 @@ from PyQt6.QtGui import (QPixmap, QImage, QPainter, QPen, QColor,
                           QFont, QBrush, QResizeEvent)
 
 import dic_core
+import rt_panel
 
 # ===========================================================================
 # 定数
@@ -849,6 +850,7 @@ class DICWorker(QThread):
                         search_x=search_x, search_y=search_y, method=method,
                         zncc_threshold=zncc_thr, roi_xyxy=self.cfg.get("roi_xyxy"),
                         n_workers=n_workers, init_u_grid=iu_ra, init_v_grid=iv_ra,
+                        icgn=self.cfg.get("icgn", False),
                     )
                     if ref_mode == "fixed":
                         _pu = map_ra["U"].copy(); _pv = map_ra["V"].copy()
@@ -1083,6 +1085,7 @@ class DICWorker(QThread):
                             n_workers=n_workers,
                             init_u_grid=iu,
                             init_v_grid=iv,
+                            icgn=self.cfg.get("icgn", False),
                         )
                         if ref_mode == "fixed":
                             # 累積アライメントを除いた純粋な変位を保存する。
@@ -1209,6 +1212,7 @@ class MainWindow(QMainWindow):
         main_hsplit.setSizes([280, 1050])
 
         root.addWidget(main_hsplit)
+        self._rt_panel.bind_host()
 
         self.statusBar().showMessage("待機中 — フォルダを選択して ▶ Start を押してください")
         self.statusBar().setStyleSheet("background:#252525;color:#777;")
@@ -1285,6 +1289,13 @@ class MainWindow(QMainWindow):
         self.cb_subpixel = QComboBox()
         self.cb_subpixel.addItems(["parabolic", "gaussian", "spline"])
         form2.addRow("サブピクセル:", self.cb_subpixel)
+
+        self.chk_icgn = QCheckBox("IC-GN 精密化")
+        self.chk_icgn.setChecked(True)
+        self.chk_icgn.setToolTip("整数探索＋放物線フィットの結果を初期値に、1次形状関数＋B-spline補間の\n"
+                                 "IC-GN 反復でサブピクセル変位を求め直す（ピクセルロッキングを1桁以上低減）。\n"
+                                 "マップモードとリアルタイムマップで有効。計算時間は増える")
+        form2.addRow("", self.chk_icgn)
 
         self.sp_workers = QSpinBox()
         self.sp_workers.setRange(-1, 32)
@@ -1413,6 +1424,9 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_twopoint_tab(), "2点間モード")
         self.tabs.addTab(self._build_map_tab(),      "マップモード")
+        self._rt_panel = rt_panel.RTMapPanel(self, ImageCanvas)
+        self.tabs.addTab(self._rt_panel,             "リアルタイムマップ")
+        self._cur_tab = 0
         self.tabs.currentChanged.connect(self._on_tab_changed)
         return self.tabs
 
@@ -1646,12 +1660,22 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, idx: int):
         """タブ切替時：探索範囲を保存・復元。マップタブへの切替はフォルダがあれば自動監視開始。"""
-        prev = 1 - idx  # 0→1, 1→0
-        self._search_defaults[prev]["x"] = self.sp_search_x.value()
-        self._search_defaults[prev]["y"] = self.sp_search_y.value()
-        self.sp_search_x.setValue(self._search_defaults[idx]["x"])
-        self.sp_search_y.setValue(self._search_defaults[idx]["y"])
-        if idx == 1:  # マップタブ
+        prev = self._cur_tab
+        self._cur_tab = idx
+        if prev in self._search_defaults:
+            self._search_defaults[prev]["x"] = self.sp_search_x.value()
+            self._search_defaults[prev]["y"] = self.sp_search_y.value()
+        if idx in self._search_defaults:
+            self.sp_search_x.setValue(self._search_defaults[idx]["x"])
+            self.sp_search_y.setValue(self._search_defaults[idx]["y"])
+        if idx == 2:  # リアルタイムマップタブ：操作はタブ内で完結。左パネルのモード別ボタンは全て隠す
+            self._start_stop_widget.setVisible(False)
+            self.btn_dic_run.setVisible(False)
+            self.btn_reanalyze.setVisible(False)
+            self.btn_quality.setVisible(False)
+            self._roi_btn_widget.setVisible(False)
+            self._align_confirm_widget.setVisible(False)
+        elif idx == 1:  # マップタブ
             self._start_stop_widget.setVisible(False)
             self.btn_dic_run.setVisible(True)
             self.btn_reanalyze.setVisible(True)
@@ -1762,7 +1786,10 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.statusBar().showMessage(f"品質評価: 画像読み込みエラー — {e}")
             return
+        self._show_quality(img, self._roi_xyxy, record_mig=True)
 
+    def _show_quality(self, img: np.ndarray, roi_xyxy, record_mig: bool = False):
+        """画像配列に対して品質評価ダイアログを表示する（マップモード・リアルタイムモード共用）。"""
         subset_size = self.sp_subset.value()
         step        = self.sp_step.value()
         search_x    = self.sp_search_x.value()
@@ -1776,7 +1803,7 @@ class MainWindow(QMainWindow):
             X, Y = dic_core.create_grid(
                 img.shape[:2], subset_size,
                 max(search_x, search_y), step,
-                self._roi_xyxy,
+                roi_xyxy,
             )
         except Exception as e:
             self.statusBar().showMessage(f"品質評価: グリッド生成エラー — {e}")
@@ -1787,17 +1814,18 @@ class MainWindow(QMainWindow):
 
         # スペックルサイズ 3×3（ACF ハーフ幅）
         speckle_sizes = dic_core.calc_speckle_sizes_grid(
-            img, roi_xyxy=self._roi_xyxy, n_div=3)
+            img, roi_xyxy=roi_xyxy, n_div=3)
 
         # ダイアログ表示
         dlg = QualityDialog(
             mig, sssig, X, Y, img.shape,
-            speckle_sizes, self._roi_xyxy, subset_size, self)
+            speckle_sizes, roi_xyxy, subset_size, self)
         dlg.show()
         dlg.raise_()
 
-        # MIG をフレームテーブルの最新行に記録
-        self._update_mig_in_table(mig)
+        # MIG をフレームテーブルの最新行に記録（マップモードのみ）
+        if record_mig:
+            self._update_mig_in_table(mig)
 
         self.statusBar().showMessage(
             f"品質評価完了 — MIG = {mig:.4f}  "
@@ -2303,6 +2331,7 @@ class MainWindow(QMainWindow):
             "gauges":       self._gauges,
             "roi_xyxy":     self._roi_xyxy,
             "n_workers":    self.sp_workers.value(),
+            "icgn":         self.chk_icgn.isChecked(),
         }
 
         self._map_stack.setCurrentIndex(0)
@@ -2360,6 +2389,7 @@ class MainWindow(QMainWindow):
             f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
     def closeEvent(self, ev):
+        self._rt_panel.shutdown()
         self._on_stop()
         self._subset_win.close()
         super().closeEvent(ev)
@@ -2426,4 +2456,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()   # PyInstaller exe で子プロセス生成時にGUIが増殖するのを防ぐ
     main()

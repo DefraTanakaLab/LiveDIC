@@ -14,3 +14,7 @@ LiveDIC.ico
 
 # Claude
 .claude/
+
+# デモ動画（make_demo_movie.py で再生成できる・400MB級）
+Demo_realtime/*.avi
+Demo_realtime/*.mp4

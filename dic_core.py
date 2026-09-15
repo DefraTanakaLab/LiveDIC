@@ -19,6 +19,12 @@ except ImportError:
     _JOBLIB = False
 
 try:
+    import dic_icgn
+    _ICGN = True
+except ImportError:
+    _ICGN = False
+
+try:
     from scipy.interpolate import RectBivariateSpline
     _SCIPY = True
 except ImportError:
@@ -281,10 +287,14 @@ def run_dic_full(
     n_workers: int = -1,
     init_u_grid: Optional[np.ndarray] = None,
     init_v_grid: Optional[np.ndarray] = None,
+    icgn: bool = False,
+    icgn_max_iter: int = 12,
 ) -> Dict[str, np.ndarray]:
     """
     フルフィールドDIC。joblib で行単位並列処理。
-    戻り値: {'X','Y','U','V','zncc', 'exx','eyy','exy'}
+    icgn=True で整数探索＋放物線フィットの結果を初期値に IC-GN（1次形状関数・B-spline補間）で
+    サブピクセル精密化する（ピクセルロッキング低減）。
+    戻り値: {'X','Y','U','V','zncc', 'exx','eyy','exy'} （icgn 時は 'icgn_conv' も）
     """
     X, Y = create_grid(ref.shape, subset_size, max(search_x, search_y), step, roi_xyxy)
     ny, nx = X.shape
@@ -322,8 +332,21 @@ def run_dic_full(
         U[mask] = np.nan
         V[mask] = np.nan
 
+    extra = {}
+    if icgn and _ICGN:
+        u2, v2, z2, conv = dic_icgn.refine_uv(
+            ref, deformed, X.ravel(), Y.ravel(), U.ravel(), V.ravel(),
+            subset_size, max_iter=icgn_max_iter)
+        # 収束した点、または未収束でも相関が悪化していない点（最適解へ近づいている）を採用。
+        # ノイズの多い SEM 画像では最小値付近が平坦で 1e-3 px の収束判定に届かないことがある
+        acc = np.isfinite(z2) & (conv | (z2 >= Z.ravel()))
+        Uf, Vf, Zf = U.ravel(), V.ravel(), Z.ravel()
+        Uf[acc] = u2[acc]; Vf[acc] = v2[acc]; Zf[acc] = z2[acc]
+        U, V, Z = Uf.reshape(ny, nx), Vf.reshape(ny, nx), Zf.reshape(ny, nx)
+        extra["icgn_conv"] = acc.reshape(ny, nx)
+
     strain = calc_strain_field(X, Y, U, V, step)
-    return {"X": X, "Y": Y, "U": U, "V": V, "zncc": Z, **strain}
+    return {"X": X, "Y": Y, "U": U, "V": V, "zncc": Z, **strain, **extra}
 
 
 # ---------------------------------------------------------------------------

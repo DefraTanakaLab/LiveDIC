@@ -10,8 +10,15 @@
 
 - **2点間モード**: 登録したゲージ点間のひずみをリアルタイムグラフ表示
 - **マップモード**: フルフィールドひずみマップをバックグラウンド計算・スライダーで閲覧
+- **リアルタイムマップモード**: USBカメラ（1080p/30fps）から直接取得し、引張試験中のひずみマップをライブ表示
+  - 前フレーム変位を予測値にした狭探索＋必要時のみ自動拡張、相関低下時の自動再参照
+  - カラースケールは試験中固定（0–2 / 5 / 10 / 20 % プリセット）でひずみ集中の成長を可視化
+  - CUDA（CuPy）があれば GPU、なければ CPU に自動フォールバック。CPU でも 1080p・約1,800点で 20 fps 以上
+  - 一定間隔のスナップショット保存と停止後の見返し
+  - ソースは USB カメラ / 動画ファイル / 合成デモ。カメラが無くても `python make_demo_movie.py` で作ったデモ動画で試せる
 - ZNCC（cv2.matchTemplate使用・高速化済み）
 - サブピクセル補間（parabolic / gaussian / spline）
+- **IC-GN サブピクセル精密化**（1次形状関数＋B-spline補間。ピクセルロッキングを 0.03px → 0.0005px 級に低減。マップ・リアルタイムモード）
 - 固定参照 / 更新参照モード
 - 累積ひずみ / 差分ひずみ 切り替え表示
 - 手動アライメント（半透明ドラッグ）
@@ -40,6 +47,14 @@ pip install -r requirements.txt
 python main.py
 ```
 
+リアルタイムマップを GPU で動かす場合（NVIDIA GPU + CUDA 12）:
+
+```bash
+pip install cupy-cuda12x
+```
+
+起動時に自動判定され、タブ内の「バックエンド」に GPU 名が表示されます。
+
 ## exeをビルドする場合
 
 ```bash
@@ -55,6 +70,11 @@ build.bat
 |---|---|
 | `main.py` | PyQt6 GUI メイン |
 | `dic_core.py` | DIC計算コアモジュール |
+| `dic_icgn.py` | IC-GN サブピクセル精密化（CuPy/NumPy 共通） |
+| `dic_rt.py` | リアルタイムマップ用トラッカー（CuPy/NumPy 共通） |
+| `rt_source.py` | USBカメラ取得・合成変形デモ |
+| `rt_panel.py` | リアルタイムマップタブ UI |
+| `make_demo_movie.py` | リアルタイムマップ用デモ動画の生成 |
 | `build.bat` | PyInstaller exeビルドスクリプト |
 | `make_icon.py` | アイコン生成スクリプト |
 | `requirements.txt` | 依存パッケージ |
