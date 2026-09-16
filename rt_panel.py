@@ -355,7 +355,9 @@ class RTMapPanel(QWidget):
         row2.addWidget(QLabel("探索 ±"))
         self.sp_r1 = QSpinBox(); self.sp_r1.setRange(1, 100); self.sp_r1.setValue(10); self.sp_r1.setFixedWidth(46)
         self.sp_r1.setToolTip("探索半径 [px]。予測位置を中心に全点をこの範囲で探索する")
-        self.sp_r2 = QSpinBox(); self.sp_r2.setRange(0, 200); self.sp_r2.setValue(30); self.sp_r2.setFixedWidth(46)
+        # GPU では第 2 段は FFT 相関で ±50 全点でも 16 ms なので既定を広げる（CPU は計算量上限で省略されるため 30 のまま）
+        self.sp_r2 = QSpinBox(); self.sp_r2.setRange(0, 200); self.sp_r2.setFixedWidth(46)
+        self.sp_r2.setValue(50 if dic_rt.gpu_available() else 30)
         self.sp_r2.setToolTip("拡張探索の半径 [px]。第1段で相関が取れなかった点だけをこの範囲で再探索する。"
                               "それでも見つからない大きな移動は位相相関で全体ズレを測って復帰する。0 で無効")
         row2.addWidget(self.sp_r1); row2.addWidget(QLabel("拡張 ±")); row2.addWidget(self.sp_r2)

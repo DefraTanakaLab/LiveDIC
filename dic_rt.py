@@ -485,6 +485,24 @@ class RTTracker:
                 sel = rest[better]
                 u[sel] = us[better]; v[sel] = vs[better]; z[sel] = zs[better]
                 need[rest] = (z[rest] < self.retry_zncc) | bs
+        elif len(self.stages) >= 2 and self._prev_frame is not None:
+            # 最終段を実行しても大半の点が見つからない → 探索半径を超えるジャンプ。
+            # （GPU は計算量上限が緩く最終段が省略されないため、上の「省略時」経路には入らない。
+            #   元は省略→プローブ→位相相関の順で復帰していたが、実行して外れた場合も同じ復帰が要る）
+            idx = np.nonzero(need)[0]
+            n_valid_now = int(self.valid.sum())
+            if idx.size >= max(4, int(0.5 * n_valid_now)):
+                gs = self._global_shift(def_img_u8)
+                if gs is not None:
+                    sx, sy = gs
+                    iu3 = np.round(self.u_pred[idx] + sx).astype(np.int64)
+                    iv3 = np.round(self.v_pred[idx] + sy).astype(np.int64)
+                    us, vs, zs, bs = self._search(img, idx, iu3, iv3, self.stages[1])
+                    better = zs > z[idx]
+                    sel = idx[better]
+                    u[sel] = us[better]; v[sel] = vs[better]; z[sel] = zs[better]
+                    need[idx] = (z[idx] < self.retry_zncc) | bs
+                    n_probe_used = -int(abs(sx) + abs(sy))   # 負値で「位相相関で復帰」を表す
 
         # マッチしたサブセットが実画像の外（パディング領域）にかかる点は視野外として無効
         H, W = self.img_shape
