@@ -83,6 +83,18 @@ QSlider::groove:horizontal   {background:#333;height:4px;border-radius:2px;}
 QSlider::handle:horizontal   {background:#4fc3f7;width:14px;height:14px;
                               border-radius:7px;margin:-5px 0;}
 QSplitter::handle            {background:#333;}
+QCheckBox,QRadioButton       {color:#e0e0e0;spacing:5px;}
+QCheckBox::indicator,QRadioButton::indicator
+                             {width:14px;height:14px;background:#3c3c3c;
+                              border:1px solid #9a9a9a;border-radius:3px;}
+QRadioButton::indicator      {border-radius:8px;}
+QCheckBox::indicator:hover,QRadioButton::indicator:hover
+                             {border-color:#4fc3f7;}
+QCheckBox::indicator:checked,QRadioButton::indicator:checked
+                             {background:#4fc3f7;border-color:#4fc3f7;}
+QCheckBox::indicator:disabled,QRadioButton::indicator:disabled
+                             {background:#2a2a2a;border-color:#555;}
+QCheckBox:disabled,QRadioButton:disabled {color:#666;}
 QScrollBar:vertical          {background:#252525;width:10px;}
 QScrollBar::handle:vertical  {background:#555;border-radius:4px;}
 """
