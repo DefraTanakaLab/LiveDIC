@@ -226,13 +226,12 @@ class RTMapPanel(QWidget):
         row2.addWidget(self.lbl_roi)
         row2.addSpacing(12)
         row2.addWidget(QLabel("探索 ±"))
-        self.sp_r1 = QSpinBox(); self.sp_r1.setRange(1, 50); self.sp_r1.setValue(10); self.sp_r1.setFixedWidth(46)
-        self.sp_r2 = QSpinBox(); self.sp_r2.setRange(0, 100); self.sp_r2.setValue(20); self.sp_r2.setFixedWidth(46)
-        self.sp_r3 = QSpinBox(); self.sp_r3.setRange(0, 200); self.sp_r3.setValue(40); self.sp_r3.setFixedWidth(46)
-        for sp in (self.sp_r1, self.sp_r2, self.sp_r3):
-            sp.setToolTip("段階探索の半径 [px]。第1段は全点、第2・3段は相関不良点のみ。0 で無効")
-        row2.addWidget(self.sp_r1); row2.addWidget(QLabel("→")); row2.addWidget(self.sp_r2)
-        row2.addWidget(QLabel("→")); row2.addWidget(self.sp_r3)
+        self.sp_r1 = QSpinBox(); self.sp_r1.setRange(1, 100); self.sp_r1.setValue(10); self.sp_r1.setFixedWidth(46)
+        self.sp_r1.setToolTip("探索半径 [px]。予測位置を中心に全点をこの範囲で探索する")
+        self.sp_r2 = QSpinBox(); self.sp_r2.setRange(0, 200); self.sp_r2.setValue(30); self.sp_r2.setFixedWidth(46)
+        self.sp_r2.setToolTip("拡張探索の半径 [px]。第1段で相関が取れなかった点だけをこの範囲で再探索する。"
+                              "それでも見つからない大きな移動は位相相関で全体ズレを測って復帰する。0 で無効")
+        row2.addWidget(self.sp_r1); row2.addWidget(QLabel("拡張 ±")); row2.addWidget(self.sp_r2)
         row2.addSpacing(12)
         row2.addWidget(QLabel("ZNCC閾値:"))
         self.sp_zncc = QDoubleSpinBox(); self.sp_zncc.setRange(0, 1); self.sp_zncc.setSingleStep(0.05)
@@ -593,7 +592,6 @@ class RTMapPanel(QWidget):
     def _tracker_kwargs(self) -> dict:
         stages = [self.sp_r1.value()]
         if self.sp_r2.value() > 0: stages.append(self.sp_r2.value())
-        if self.sp_r3.value() > 0: stages.append(self.sp_r3.value())
         return dict(
             subset_size=self.host.sp_subset.value() | 1,
             step=self.host.sp_step.value(),
@@ -644,7 +642,7 @@ class RTMapPanel(QWidget):
         self._latest = None
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2, self.sp_r3,
+        for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
                     self.sp_zncc, self.sp_reref, self.chk_median, self.chk_gpu, self.btn_preview,
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.chk_icgn):
             wdg.setEnabled(False)
@@ -659,7 +657,7 @@ class RTMapPanel(QWidget):
         self._worker = None
         self.btn_start.setEnabled(self._source is not None)
         self.btn_stop.setEnabled(False)
-        for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2, self.sp_r3,
+        for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
                     self.sp_zncc, self.sp_reref, self.chk_median, self.btn_preview,
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.chk_icgn):
             wdg.setEnabled(True)
