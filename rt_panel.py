@@ -239,10 +239,6 @@ class RTMapPanel(QWidget):
         self.sp_reref.setValue(0.75); self.sp_reref.setDecimals(2); self.sp_reref.setFixedWidth(56)
         self.sp_reref.setToolTip("中央値ZNCCがこの値を下回ると現フレームを新しい参照にする（変位は累積）")
         row2.addWidget(self.sp_reref)
-        self.chk_median = QCheckBox("メディアン")
-        self.chk_median.setChecked(True)
-        self.chk_median.setToolTip("変位場に 3×3 メディアンフィルタ（孤立した誤マッチを抑える）")
-        row2.addWidget(self.chk_median)
         self.lbl_params = QLabel("")
         self.lbl_params.setStyleSheet("color:#888;font-size:9px;")
         row2.addWidget(self.lbl_params)
@@ -608,7 +604,6 @@ class RTMapPanel(QWidget):
             search_stages=stages,
             reref_zncc=self.sp_reref.value(),
             use_gpu=self.chk_gpu.isChecked() and dic_rt.gpu_available(),
-            median_filter=self.chk_median.isChecked(),
             rate_window=self.sp_rate_win.value(),
             rate_smooth=3 if self.chk_rate_smooth.isChecked() else 1,
             icgn=self.host.chk_icgn.isChecked(),   # 左パネル「IC-GN 精密化」（マップモードと共通）
@@ -644,7 +639,7 @@ class RTMapPanel(QWidget):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
-                    self.sp_zncc, self.sp_reref, self.chk_median, self.chk_gpu, self.btn_scan,
+                    self.sp_zncc, self.sp_reref, self.chk_gpu, self.btn_scan,
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.host.chk_icgn):
             wdg.setEnabled(False)
         self.host._append_log(f"参照取得: フレーム {fid}  スナップショット: "
@@ -659,7 +654,7 @@ class RTMapPanel(QWidget):
         self.btn_start.setEnabled(self._source is not None)
         self.btn_stop.setEnabled(False)
         for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
-                    self.sp_zncc, self.sp_reref, self.chk_median, self.btn_scan,
+                    self.sp_zncc, self.sp_reref, self.btn_scan,
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.host.chk_icgn):
             wdg.setEnabled(True)
         self.chk_gpu.setEnabled(dic_rt.gpu_available())

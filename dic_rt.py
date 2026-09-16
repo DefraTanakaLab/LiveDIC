@@ -93,7 +93,7 @@ class RTTracker:
         use_gpu: Optional[bool] = None,
         mac_budget: Optional[float] = None,
         n_threads: Optional[int] = None,
-        median_filter: bool = True,
+        median_filter: bool = False,
         rate_window: float = 3.0,
         rate_smooth: int = 3,
         icgn: bool = False,
