@@ -59,8 +59,8 @@
   - 修正後 `check_gpu.py`: 1080p・1,547 点 整数 10 ms / IC-GN 込み **18 ms（56 fps）**、4K・5,973 点 31 ms / 61 ms。CPU 比 8〜9 倍。CPU/GPU 差は U,V < 3e-4 px、exx < 1e-5 で一致
   - GPU 側の一般則: CuPy では要素ごとの Python ループ・多数の小さな fancy index は避け、cuFFT / cuBLAS / cupyx.ndimage の単一カーネルに寄せる
   - CPU 側の付随修正: `np.nanmedian`（マスク配列経由で 52×94・5×5 窓に 9 ms）→ ソート＋有限個数で中央を取る `_nanmedian_last`（0.9 ms、結果はビット一致）。近傍伝播・プローブ伝播・3×3 メディアンで毎フレーム呼ばれていた
-  - GUI 内の実測（合成デモ・全画面 4,888 点・IC-GN ON）: スタンドアロン 48 ms/frame（21 fps）に対し GUI 内では 11〜12 fps。描画スレッド（`cv2.remap` ワープ＋オーバーレイ合成＋QPixmap）との GIL 競合。ROI を絞れば（実機の想定 ~1,800 点）余裕がある
-  - 合成デモを全画面 ROI で回すと、上下の試験片外（ノイズのみ）が不良点になり `frac_bad` 0.3〜0.5 で **中央値 ZNCC=1.000 のまま自動再参照が約 1 s ごとに走る**。再参照は IC-GN 参照側の再構築（約 330 ms）を伴う。デモ／実機とも ROI を試験片上に取ること
+  - GUI 内の実測（`SyntheticSource` を UI に流し込んで計測・全画面 4,888 点・IC-GN ON）: スタンドアロン 48 ms/frame（21 fps）に対し GUI 内では 11〜12 fps。描画スレッド（`cv2.remap` ワープ＋オーバーレイ合成＋QPixmap）との GIL 競合。ROI を絞れば（実機の想定 ~1,800 点）余裕がある
+  - 全画面 ROI で試験片外（無地・ノイズのみ）を含めると、その点が不良になり `frac_bad` 0.3〜0.5 で **中央値 ZNCC=1.000 のまま自動再参照が約 1 s ごとに走る**。再参照は IC-GN 参照側の再構築（約 330 ms）を伴う。実機では ROI を試験片上に取ること
 - 依存の互換性: matplotlib 3.9 で `cm.get_cmap` が削除された → `matplotlib.colormaps[name]` に変更（main.py / rt_panel.py）。opencv-python 5.0 / numpy 2.5 / PyQt6 6.11 では問題なし
 - 全フレームを RAM 保持しない。一定間隔のスナップショット（.npz）をディスクに保存し、停止後にスライダーで見返す
 - 実測（i7-9700, CPU）: 1080p・ROI 1920×380・subset41・step20（約1,800点）で 22〜27 fps
@@ -71,7 +71,11 @@
 ### 引き継ぎ状況（2026-09-16 時点）
 - 開発は GPU 無しの i7-9700 機で行い、実機（400-CAM106・白テープ＋スプレーのスペックル・1080p 30fps）で CPU のみで追従できることを確認済み。以降は **GPU 搭載機（Ryzen 9 8945HX + RTX 5070 Ti Laptop、Python 3.13、`C:\tools\LiveDIC`）で続きを行う**
 - GPU 機のセットアップ済み: `pip install -r requirements.txt` と `pip install "cupy-cuda12x[ctk]"`。**CuPy 14 系は CUDA ヘッダを要求する**ので `[ctk]` 付き（pip の cuda-toolkit 12.9 wheel が入る）。素の `cupy-cuda12x` だけでは「Failed to find CUDA headers」で GPU 不可になる。起動時の「CUDA path could not be detected」UserWarning は無害
-- `check_gpu.py` で数値一致を確認済み、GPU 経路の性能修正済み（上記）。残りはリアルタイムマップの実機確認（400-CAM106 で GPU バックエンド表示・追従・fps）
+- `check_gpu.py` で数値一致を確認済み、GPU 経路の性能修正済み（上記）
+- **実機確認（2026-09-16、GPU 機 + 400-CAM106）**: 1080p30・ROI 1840×400・subset41・step20（1,953 点）・IC-GN ON・GPU で **処理 30 fps・間引きゼロ**（起動直後の 11 フレームのみ）、静止時の中央値 ZNCC 0.979。内蔵 Web カメラ（不良点 8% の部屋の映像）でも 12 秒・348 フレーム安定
+  - **`cupyx.scipy.ndimage.map_coordinates` は mode="nearest" でも inf / 巨大座標をクランプせず `cudaErrorIllegalAddress` で CUDA コンテキストごと落ちる**（NaN は NaN を返すだけ）。実カメラでは IC-GN が発散した点の座標が流れ込み、約 4 秒で全 GPU 処理が死んだ。`dic_icgn._sample` で `nan_to_num` ＋ clip してから渡すことで解消（合成データでは発生しない。GPU 経路の変更時は必ず実カメラでも回すこと）
+  - このノート PC では内蔵 Web カメラが「カメラ 0」、400-CAM106 が「カメラ 1」（DirectShow 名 "UVC Video Device"、VID_EB1A）。タブ表示時の自動選択は最初に見つかった 0 になるので、実機ではコンボで 1 を選ぶ
+  - **カメラ取得スレッドを止めずにプロセスが終了すると 400-CAM106 が DirectShow から開けなくなる**（open に 25 秒かかって失敗、デバイス状態は OK のまま）。USB の抜き差しで復帰。LiveDIC が異常終了したときは再接続が必要
 - カメラ: 400-CAM106 を採用方向（近接用・固定フォーカス・歪み小）。Insta360 Link 2C Pro は広角の樽型歪み（端で 8%）と自動機能（HDR・AF・オートフレーミング）のため不採用方向
 - 400-CAM106 の注意: 1080p は設定順序次第で非圧縮 YUY2（2.5fps）に落ちる。`CameraSource` は fps→解像度→FOURCC の順で設定済み。4K は MJPG 15fps。付属アプリ（UMviewer）を閉じないと DirectShow で開けない
 - 未対応: 2点間モードへの IC-GN 適用、レンズ歪み補正（`cv2.undistort`。Insta360 を使う場合のみ必要）

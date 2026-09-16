@@ -176,7 +176,13 @@ class ICGNRefiner:
             return out
         # GPU: cupyx の map_coordinates（単一カーネル）。xp の fancy index で 16 タップを
         # 手書き gather すると 1080p・1,547 点で 11 ms かかった（同 0.3 ms、差 5e-7）
+        # 注意: cupyx の map_coordinates は mode="nearest" でも inf / 巨大座標を安全にクランプせず
+        # cudaErrorIllegalAddress で CUDA コンテキストごと落ちる（実カメラで IC-GN が発散した点で発生）。
+        # 事前に有限化して画像内にクランプする（nearest と同じ意味なので結果は変わらない）
         xp = self.xp
+        H, W = self._coef.shape
+        X = xp.clip(xp.nan_to_num(X, nan=0.0, posinf=W - 1.0, neginf=0.0), 0.0, W - 1.0)
+        Y = xp.clip(xp.nan_to_num(Y, nan=0.0, posinf=H - 1.0, neginf=0.0), 0.0, H - 1.0)
         coords = xp.stack([Y.ravel(), X.ravel()])
         return _cpx_ndi.map_coordinates(self._coef, coords, order=3, prefilter=False,
                                         mode="nearest", output=xp.float32).reshape(X.shape)
