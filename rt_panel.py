@@ -196,9 +196,9 @@ class RTMapPanel(QWidget):
         for w, h in RESOLUTIONS:
             self.cb_res.addItem(f"{w}×{h}")
         row1.addWidget(self.cb_res)
-        self.btn_preview = QPushButton("▶ プレビュー")
-        self.btn_preview.clicked.connect(self._toggle_preview)
-        row1.addWidget(self.btn_preview)
+        # ソース／解像度を選ぶと即プレビュー開始（activated は同じ項目を選び直しても発火する）
+        self.cb_source.activated.connect(lambda _i: self._start_source())
+        self.cb_res.activated.connect(lambda _i: self._start_source())
         row1.addSpacing(16)
         self.chk_gpu = QCheckBox("GPUを使う")
         self.chk_gpu.setChecked(dic_rt.gpu_available())
@@ -344,7 +344,7 @@ class RTMapPanel(QWidget):
         lay.addLayout(row4)
 
         # ---- ステータス ----
-        self.lbl_status = QLabel("待機中 — ソースを選んでプレビューを開始してください")
+        self.lbl_status = QLabel("待機中 — 「カメラ検索」でカメラを探すか、ソースを選ぶと映像が出ます")
         self.lbl_status.setStyleSheet("color:#4fc3f7;font-size:10px;")
         lay.addWidget(self.lbl_status)
 
@@ -434,6 +434,9 @@ class RTMapPanel(QWidget):
         self.btn_scan.setEnabled(True)
         self.btn_scan.setText("カメラ検索")
         self.host._append_log(f"カメラ検索: {cams if cams else 'なし'}")
+        if cams and self._worker is None:
+            self.cb_source.setCurrentIndex(0)      # 見つかった最初のカメラ
+            self._start_source()
 
     def _open_video(self):
         start_dir = self._video_path or str(pathlib.Path(__file__).parent / "Demo_realtime")
@@ -445,17 +448,24 @@ class RTMapPanel(QWidget):
         self._populate_sources(self._cam_list)
         self.cb_source.setCurrentIndex(self.cb_source.count() - 1)
         self.host._append_log(f"動画ソース: {path}")
+        self._start_source()
 
-    def _toggle_preview(self):
+    def _stop_source(self):
         if self._source is not None:
-            self._stop()
             self._source.stop()
             self._source = None
-            self.btn_preview.setText("▶ プレビュー")
-            self.btn_start.setEnabled(False)
-            self.lbl_status.setText("プレビュー停止")
+        self.btn_start.setEnabled(False)
+
+    def _start_source(self):
+        """コンボで選ばれているソースを開いてプレビューを始める（解析中は何もしない）。"""
+        if self._worker is not None:
             return
-        kind, idx = self.cb_source.currentData()
+        self._stop_source()
+        self._back_to_live()
+        data = self.cb_source.currentData()
+        if data is None:
+            return
+        kind, idx = data
         w, h = RESOLUTIONS[self.cb_res.currentIndex()]
         if kind == "cam":
             self._source = rt_source.CameraSource(idx, w, h, 30)
@@ -465,9 +475,8 @@ class RTMapPanel(QWidget):
             self._source = rt_source.SyntheticSource(w, h, 30.0)
         self._source.start()
         self._preview_fid = -1
-        self.btn_preview.setText("■ プレビュー停止")
         self.btn_start.setEnabled(True)
-        self.lbl_status.setText("カメラを開いています…")
+        self.lbl_status.setText("ソースを開いています…")
         self.host._append_log(f"プレビュー開始: {self.cb_source.currentText()} {w}×{h}")
 
     # ------------------------------------------------------------------
@@ -643,7 +652,7 @@ class RTMapPanel(QWidget):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
-                    self.sp_zncc, self.sp_reref, self.chk_median, self.chk_gpu, self.btn_preview,
+                    self.sp_zncc, self.sp_reref, self.chk_median, self.chk_gpu, self.btn_scan, self.btn_video,
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.chk_icgn):
             wdg.setEnabled(False)
         self.host._append_log(f"参照取得: フレーム {fid}  スナップショット: "
@@ -658,7 +667,7 @@ class RTMapPanel(QWidget):
         self.btn_start.setEnabled(self._source is not None)
         self.btn_stop.setEnabled(False)
         for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
-                    self.sp_zncc, self.sp_reref, self.chk_median, self.btn_preview,
+                    self.sp_zncc, self.sp_reref, self.chk_median, self.btn_scan, self.btn_video,
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.chk_icgn):
             wdg.setEnabled(True)
         self.chk_gpu.setEnabled(dic_rt.gpu_available())
@@ -674,9 +683,7 @@ class RTMapPanel(QWidget):
         """アプリ終了時に呼ぶ。"""
         self._timer.stop()
         self._stop()
-        if self._source is not None:
-            self._source.stop()
-            self._source = None
+        self._stop_source()
 
     # ------------------------------------------------------------------
     # 結果受信・描画
