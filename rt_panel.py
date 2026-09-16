@@ -23,8 +23,8 @@ from PyQt6.QtWidgets import (
     QComboBox, QSpinBox, QDoubleSpinBox, QRadioButton, QButtonGroup,
     QSlider, QCheckBox, QSizePolicy, QDialog, QDialogButtonBox, QFormLayout,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QKeySequence, QShortcut
 
 import dic_core
 import dic_rt
@@ -58,6 +58,119 @@ def rgb_to_qpixmap(rgb: np.ndarray) -> QPixmap:
 def _fmt_scale(v_pct: float, rate: bool) -> str:
     """スケール値の表示。ひずみは整数 %、速度は小数 2 桁 %/s。"""
     return f"{v_pct:.2f} %/s" if rate else f"{v_pct:.0f} %"
+
+
+ROTATIONS = [("横（そのまま）", 0), ("縦（時計回り 90°）", -1), ("縦（反時計回り 90°）", 1)]   # (表示名, np.rot90 の k)
+
+
+class _FitImage(QWidget):
+    """アスペクト比を保ってウィジェットいっぱいに画像を描く表示専用ウィジェット（補間なし）。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pix: Optional[QPixmap] = None
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(160, 120)
+        self.setStyleSheet("background:#000;")
+
+    def set_pixmap(self, pix: QPixmap):
+        self._pix = pix
+        self.update()
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.fillRect(self.rect(), Qt.GlobalColor.black)
+        if self._pix is None or self._pix.isNull():
+            return
+        # 科学データの表示なので補間・美化はしない（FastTransformation 相当）
+        scaled = self._pix.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.FastTransformation)
+        x = (self.width() - scaled.width()) // 2
+        y = (self.height() - scaled.height()) // 2
+        p.drawPixmap(QRect(x, y, scaled.width(), scaled.height()), scaled)
+
+
+class RTDisplayWindow(QWidget):
+    """
+    カメラ画像＋ひずみマップを別ウィンドウで表示する（第 2 モニタ・プロジェクタ用）。
+    タブ側のキャンバスは操作用（ROI 等）にそのまま残し、このウィンドウは同じ RGB を
+    向き（横／縦 90° 回転）を変えて映すだけ。F11 または ダブルクリックで全画面、Esc で解除。
+    """
+    closed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.Window)
+        self.setWindowTitle("LiveDIC — リアルタイムマップ表示")
+        self.resize(720, 1000)
+        self._rot_k = 0
+        self._last_rgb: Optional[np.ndarray] = None
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4); lay.setSpacing(3)
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("向き:"))
+        self.cb_rot = QComboBox()
+        for name, _ in ROTATIONS:
+            self.cb_rot.addItem(name)
+        self.cb_rot.currentIndexChanged.connect(self._on_rot)
+        bar.addWidget(self.cb_rot)
+        self.btn_full = QPushButton("全画面 (F11)")
+        self.btn_full.setCheckable(True)
+        self.btn_full.toggled.connect(self._set_fullscreen)
+        bar.addWidget(self.btn_full)
+        bar.addStretch()
+        self.lbl_status = QLabel("")
+        self.lbl_status.setStyleSheet("color:#4fc3f7;font-size:10px;")
+        self.lbl_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        bar.addWidget(self.lbl_status, stretch=2)
+        lay.addLayout(bar)
+        self.view = _FitImage()
+        lay.addWidget(self.view, stretch=1)
+        cb = QHBoxLayout()
+        self.lbl_cb_min = QLabel("")
+        self.lbl_cbar = QLabel(); self.lbl_cbar.setFixedHeight(14); self.lbl_cbar.setScaledContents(True)
+        self.lbl_cbar.setMinimumWidth(64)
+        self.lbl_cbar.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.lbl_cb_max = QLabel("")
+        cb.addWidget(self.lbl_cb_min); cb.addWidget(self.lbl_cbar, stretch=1); cb.addWidget(self.lbl_cb_max)
+        lay.addLayout(cb)
+        QShortcut(QKeySequence("F11"), self, activated=lambda: self.btn_full.toggle())
+        QShortcut(QKeySequence("Escape"), self, activated=lambda: self.btn_full.setChecked(False))
+
+    # ---- 外部 API ----
+    def set_rotation_index(self, idx: int):
+        self.cb_rot.setCurrentIndex(idx)
+
+    def set_frame(self, rgb: np.ndarray):
+        self._last_rgb = rgb
+        img = np.rot90(rgb, self._rot_k) if self._rot_k else rgb
+        self.view.set_pixmap(rgb_to_qpixmap(img))
+
+    def set_colorbar(self, bar_rgb: np.ndarray, text_min: str, text_max: str):
+        self.lbl_cbar.setPixmap(rgb_to_qpixmap(bar_rgb))
+        self.lbl_cb_min.setText(text_min); self.lbl_cb_max.setText(text_max)
+
+    def set_status(self, text: str):
+        self.lbl_status.setText(text)
+
+    # ---- 内部 ----
+    def _on_rot(self, idx: int):
+        self._rot_k = ROTATIONS[idx][1]
+        if self._last_rgb is not None:
+            self.set_frame(self._last_rgb)
+
+    def _set_fullscreen(self, on: bool):
+        if on:
+            self.showFullScreen()
+        else:
+            self.showNormal()
+
+    def mouseDoubleClickEvent(self, ev):
+        self.btn_full.toggle()
+
+    def closeEvent(self, ev):
+        self.btn_full.setChecked(False)
+        self.closed.emit()
+        super().closeEvent(ev)
 
 
 class _ScaleDialog(QDialog):
@@ -321,6 +434,20 @@ class RTMapPanel(QWidget):
         self.sl_alpha.setRange(0, 100); self.sl_alpha.setValue(65); self.sl_alpha.setFixedWidth(90)
         self.sl_alpha.valueChanged.connect(self._request_redraw)
         row3.addWidget(self.sl_alpha)
+        row3.addSpacing(12)
+        # 別ウィンドウ表示（第 2 モニタ・プロジェクタ用）。向きはウィンドウ側でも変えられる
+        self.btn_ext = QPushButton("別ウィンドウで表示")
+        self.btn_ext.setCheckable(True)
+        self.btn_ext.setToolTip("カメラ画像＋ひずみマップを別ウィンドウに表示する（F11 で全画面、向きは縦 90° 回転も可）")
+        self.btn_ext.toggled.connect(self._toggle_ext_window)
+        row3.addWidget(self.btn_ext)
+        self.cb_rot = QComboBox()
+        for name, _ in ROTATIONS:
+            self.cb_rot.addItem(name)
+        self.cb_rot.setToolTip("別ウィンドウでの表示の向き。引張試験機の縦向き試験片を縦長モニタに映すときは 90° 回転")
+        self.cb_rot.setEnabled(False)
+        row3.addWidget(self.cb_rot)
+        self._ext: Optional[RTDisplayWindow] = None
         row3.addStretch()
         lay.addLayout(row3)
 
@@ -585,8 +712,11 @@ class RTMapPanel(QWidget):
         rgb = np.repeat(self._lut[grad][None, :, :], 14, axis=0)
         self.lbl_cbar.setPixmap(rgb_to_qpixmap(rgb))
         rate = self._is_rate()
-        self.lbl_cb_min.setText(_fmt_scale(vmin * 100, rate))
-        self.lbl_cb_max.setText(_fmt_scale(vmax * 100, rate))
+        tmin, tmax = _fmt_scale(vmin * 100, rate), _fmt_scale(vmax * 100, rate)
+        self.lbl_cb_min.setText(tmin)
+        self.lbl_cb_max.setText(tmax)
+        if self._ext is not None:
+            self._ext.set_colorbar(rgb, tmin, tmax)
 
     def _request_redraw(self):
         self._latest_drawn_fid = -1
@@ -596,6 +726,40 @@ class RTMapPanel(QWidget):
         """ソース切替・解析開始時に描画済みフレームの記録をリセットする。"""
         self._latest_drawn_fid = -1
         self._preview_fid = -1
+
+    # ------------------------------------------------------------------
+    # 別ウィンドウ表示
+    # ------------------------------------------------------------------
+    def _toggle_ext_window(self, on: bool):
+        if on:
+            if self._ext is None:
+                self._ext = RTDisplayWindow(self)
+                self._ext.closed.connect(lambda: self.btn_ext.setChecked(False))
+                self._ext.cb_rot.currentIndexChanged.connect(
+                    lambda i: (self.cb_rot.blockSignals(True), self.cb_rot.setCurrentIndex(i),
+                               self.cb_rot.blockSignals(False)))
+                self.cb_rot.currentIndexChanged.connect(self._ext.set_rotation_index)
+            self._ext.set_rotation_index(self.cb_rot.currentIndex())
+            self._update_colorbar()
+            self._ext.set_status(self.lbl_status.text())
+            self._ext.show(); self._ext.raise_()
+            self.cb_rot.setEnabled(True)
+            self._latest_drawn_fid = -1; self._preview_fid = -1     # 直近フレームを送り直す
+        else:
+            if self._ext is not None and self._ext.isVisible():
+                self._ext.hide()
+            self.cb_rot.setEnabled(False)
+
+    def _show_rgb(self, rgb: np.ndarray):
+        """タブ内キャンバスに表示し、別ウィンドウが開いていればそちらにも同じ画像を送る。"""
+        self.canvas.set_image(rgb_to_qpixmap(rgb))
+        if self._ext is not None and self._ext.isVisible():
+            self._ext.set_frame(rgb)
+
+    def _set_status(self, text: str):
+        self.lbl_status.setText(text)
+        if self._ext is not None and self._ext.isVisible():
+            self._ext.set_status(text)
 
     # ------------------------------------------------------------------
     # 開始 / 停止
@@ -661,6 +825,8 @@ class RTMapPanel(QWidget):
         self._timer.stop()
         self._stop()
         self._stop_source()
+        if self._ext is not None:
+            self._ext.close()
 
     # ------------------------------------------------------------------
     # 結果受信・描画
@@ -676,7 +842,7 @@ class RTMapPanel(QWidget):
             self._latest_drawn_fid = out["fid"]
             self._draw_result(out["gray"], out["res"])
             st = out["res"]["stats"]
-            self.lbl_status.setText(
+            self._set_status(
                 f"取得 {out['src_fps']:.1f} fps | 解析 {out['proc_fps']:.1f} fps ({st['proc_time'] * 1000:.0f} ms) "
                 f"| 間引き {out['n_skip']} | 中央値ZNCC {st['median_zncc']:.3f} | 不良 {st['frac_bad'] * 100:.1f}% "
                 f"| 拡張探索 {st['stage_counts'][1:] if len(st['stage_counts']) > 1 else '-'}"
@@ -696,12 +862,12 @@ class RTMapPanel(QWidget):
             self._preview_fid = fr[0]
             if self._preview_fid % 2:      # プレビューは約15fpsで十分
                 return
-            self.canvas.set_image(rgb_to_qpixmap(cv2.cvtColor(fr[2], cv2.COLOR_GRAY2RGB)))
+            self._show_rgb(cv2.cvtColor(fr[2], cv2.COLOR_GRAY2RGB))
             if self._source.shape is not None and self.lbl_params.text().startswith("subset=") \
                     and "点" not in self.lbl_params.text():
                 self._update_params_label()
-            self.lbl_status.setText(f"プレビュー中: {fr[2].shape[1]}×{fr[2].shape[0]}  {self._source.fps:.1f} fps"
-                                    f"  — ROI を設定して「参照取得＆解析開始」")
+            self._set_status(f"プレビュー中: {fr[2].shape[1]}×{fr[2].shape[0]}  {self._source.fps:.1f} fps"
+                             f"  — ROI を設定して「参照取得＆解析開始」")
 
     def _draw_result(self, gray: np.ndarray, res: dict):
         data = res.get(self._comp)
@@ -714,7 +880,7 @@ class RTMapPanel(QWidget):
                                          U=res.get("U_draw", res["U"]) if follow else None,
                                          V=res.get("V_draw", res["V"]) if follow else None)
         rgb = dic_rt.compose_overlay(gray, rgba)
-        self.canvas.set_image(rgb_to_qpixmap(rgb))
+        self._show_rgb(rgb)
 
 
 class _ScanThread(QThread):
