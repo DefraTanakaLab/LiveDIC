@@ -174,7 +174,7 @@ class RTMapPanel(QWidget):
         self._lut = _lut(CMAPS[0])
         self._comp = "exx"
         self._cam_list: List[int] = []
-        self._video_path: Optional[str] = None
+        self._scanned = False        # タブを初めて表示したときに一度だけカメラ検索する
 
         lay = QVBoxLayout(self)
         lay.setSpacing(4)
@@ -188,10 +188,6 @@ class RTMapPanel(QWidget):
         self.btn_scan = QPushButton("カメラ検索")
         self.btn_scan.clicked.connect(self._scan_cameras)
         row1.addWidget(self.btn_scan)
-        self.btn_video = QPushButton("動画を開く…")
-        self.btn_video.setToolTip("撮影済み動画やデモ動画（make_demo_movie.py で生成）をカメラ代わりに再生する")
-        self.btn_video.clicked.connect(self._open_video)
-        row1.addWidget(self.btn_video)
         row1.addWidget(QLabel("解像度:"))
         self.cb_res = QComboBox()
         for w, h in RESOLUTIONS:
@@ -353,7 +349,7 @@ class RTMapPanel(QWidget):
         lay.addLayout(row4)
 
         # ---- ステータス ----
-        self.lbl_status = QLabel("待機中 — 「カメラ検索」でカメラを探すか、ソースを選ぶと映像が出ます")
+        self.lbl_status = QLabel("待機中 — カメラを検索しています…")
         self.lbl_status.setStyleSheet("color:#4fc3f7;font-size:10px;")
         lay.addWidget(self.lbl_status)
 
@@ -423,9 +419,8 @@ class RTMapPanel(QWidget):
         self.cb_source.clear()
         for i in cams:
             self.cb_source.addItem(f"カメラ {i}", ("cam", i))
-        self.cb_source.addItem("デモ（合成変形）", ("synthetic", 0))
-        if self._video_path:
-            self.cb_source.addItem(f"動画: {pathlib.Path(self._video_path).name}", ("video", self._video_path))
+        if not cams:
+            self.cb_source.addItem("（カメラなし）", None)
         idx = self.cb_source.findText(cur)
         self.cb_source.setCurrentIndex(idx if idx >= 0 else 0)
         self.cb_source.blockSignals(False)
@@ -447,17 +442,11 @@ class RTMapPanel(QWidget):
             self.cb_source.setCurrentIndex(0)      # 見つかった最初のカメラ
             self._start_source()
 
-    def _open_video(self):
-        start_dir = self._video_path or str(pathlib.Path(__file__).parent / "Demo_realtime")
-        path, _ = QFileDialog.getOpenFileName(self, "動画ファイルを選択", start_dir,
-                                              "動画 (*.avi *.mp4 *.mov *.mkv);;すべて (*)")
-        if not path:
-            return
-        self._video_path = path
-        self._populate_sources(self._cam_list)
-        self.cb_source.setCurrentIndex(self.cb_source.count() - 1)
-        self.host._append_log(f"動画ソース: {path}")
-        self._start_source()
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if not self._scanned:
+            self._scanned = True
+            self._scan_cameras()
 
     def _stop_source(self):
         if self._source is not None:
@@ -478,9 +467,7 @@ class RTMapPanel(QWidget):
         w, h = RESOLUTIONS[self.cb_res.currentIndex()]
         if kind == "cam":
             self._source = rt_source.CameraSource(idx, w, h, 30)
-        elif kind == "video":
-            self._source = rt_source.VideoFileSource(idx, loop=True)
-        else:
+        else:   # 回帰テスト用（UI からは選べない）
             self._source = rt_source.SyntheticSource(w, h, 30.0)
         self._source.start()
         self._preview_fid = -1
@@ -632,13 +619,6 @@ class RTMapPanel(QWidget):
             self.lbl_status.setText("フレームがまだ来ていません")
             return
         self._back_to_live()
-        if isinstance(self._source, rt_source.VideoFileSource):
-            # 動画は先頭に巻き戻して 1 回だけ再生。先頭フレームが来るまで待つ
-            old_fid = self._source.latest()[0]
-            self._source.restart(loop=False)
-            t0 = time.perf_counter()
-            while self._source.latest()[0] == old_fid and time.perf_counter() - t0 < 3.0:
-                time.sleep(0.01)
         fid, ts, gray = self._source.latest()
         self._ref_gray = gray.copy()
         snap_dir = None
@@ -664,7 +644,7 @@ class RTMapPanel(QWidget):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
-                    self.sp_zncc, self.sp_reref, self.chk_median, self.chk_gpu, self.btn_scan, self.btn_video,
+                    self.sp_zncc, self.sp_reref, self.chk_median, self.chk_gpu, self.btn_scan,
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.host.chk_icgn):
             wdg.setEnabled(False)
         self.host._append_log(f"参照取得: フレーム {fid}  スナップショット: "
@@ -679,12 +659,10 @@ class RTMapPanel(QWidget):
         self.btn_start.setEnabled(self._source is not None)
         self.btn_stop.setEnabled(False)
         for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
-                    self.sp_zncc, self.sp_reref, self.chk_median, self.btn_scan, self.btn_video,
+                    self.sp_zncc, self.sp_reref, self.chk_median, self.btn_scan,
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.host.chk_icgn):
             wdg.setEnabled(True)
         self.chk_gpu.setEnabled(dic_rt.gpu_available())
-        if isinstance(self._source, rt_source.VideoFileSource):
-            self._source.restart(loop=True)
         if self._snapshots:
             self.sl_review.setRange(0, len(self._snapshots) - 1)
             self.sl_review.setEnabled(True)
