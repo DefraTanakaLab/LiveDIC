@@ -18,7 +18,7 @@ from typing import Optional, Dict, List, Tuple
 
 import numpy as np
 import cv2
-import matplotlib.cm as cm
+import matplotlib
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
@@ -47,7 +47,8 @@ RESOLUTIONS = [(1920, 1080), (3840, 2160), (1280, 720), (640, 480)]
 
 
 def _lut(name: str) -> np.ndarray:
-    return (cm.get_cmap(name)(np.linspace(0, 1, 256))[:, :3] * 255).astype(np.uint8)
+    # cm.get_cmap は matplotlib 3.9 で削除
+    return (matplotlib.colormaps[name](np.linspace(0, 1, 256))[:, :3] * 255).astype(np.uint8)
 
 
 def rgb_to_qpixmap(rgb: np.ndarray) -> QPixmap:

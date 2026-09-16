@@ -26,7 +26,6 @@ if _found:
     matplotlib.rcParams["font.family"] = _found
 matplotlib.rcParams["axes.unicode_minus"] = False
 
-import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
@@ -162,7 +161,7 @@ def strain_to_qpixmap(
     if vmax is None:
         vmax = float(valid.max()) if valid.size else 0.01
     norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
-    cmap_fn = cm.get_cmap(cmap_name)
+    cmap_fn = matplotlib.colormaps[cmap_name]   # cm.get_cmap は matplotlib 3.9 で削除
     rgba = cmap_fn(norm(data), bytes=True)   # (ny, nx, 4) uint8
     rgba[~np.isfinite(data)] = [0, 0, 0, 0]  # NaN は透明
 

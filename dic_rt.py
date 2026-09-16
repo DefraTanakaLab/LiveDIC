@@ -641,15 +641,25 @@ class RTTracker:
         self.last_reref_frame = self.frame_count
 
 
+def _nanmedian_last(stack: np.ndarray) -> np.ndarray:
+    """最終軸の NaN 無視メディアン。np.nanmedian と同値だが、np.nanmedian はマスク配列経由で
+    52×94 グリッド・5×5 窓に 9 ms かかる。ソートで NaN を末尾に送り、有限個数から中央を取る。"""
+    s = np.sort(stack, axis=-1)                       # NaN は末尾
+    n = np.count_nonzero(np.isfinite(stack), axis=-1)
+    lo = np.maximum((n - 1) // 2, 0)[..., None]
+    hi = (n // 2)[..., None]
+    med = 0.5 * (np.take_along_axis(s, lo, -1)[..., 0] + np.take_along_axis(s, hi, -1)[..., 0])
+    med[n == 0] = np.nan
+    return med
+
+
 def _nanmedian_window(a: np.ndarray, k: int) -> np.ndarray:
     """NaN を無視する k×k メディアン（自分自身を含む）。全 NaN の窓は NaN。"""
     ny, nx = a.shape
     r = k // 2
     p = np.pad(a, r, mode="constant", constant_values=np.nan)
     stack = np.stack([p[dy:dy + ny, dx:dx + nx] for dy in range(k) for dx in range(k)], axis=-1)
-    with np.errstate(all="ignore"), warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        return np.nanmedian(stack, axis=-1)
+    return _nanmedian_last(stack)
 
 
 def nanmedian3(a: np.ndarray) -> np.ndarray:
@@ -659,9 +669,7 @@ def nanmedian3(a: np.ndarray) -> np.ndarray:
         return a
     p = np.pad(a, 1, mode="constant", constant_values=np.nan)
     stack = np.stack([p[dy:dy + ny, dx:dx + nx] for dy in range(3) for dx in range(3)], axis=-1)
-    with np.errstate(all="ignore"), warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        med = np.nanmedian(stack, axis=-1)
+    med = _nanmedian_last(stack)
     med[~np.isfinite(a)] = np.nan
     return med.astype(a.dtype)
 

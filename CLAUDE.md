@@ -58,6 +58,10 @@
   - `dic_icgn._sample` の GPU 側: fancy index 16 タップ手書き gather（11 ms）→ `cupyx.scipy.ndimage.map_coordinates`（0.3 ms）
   - 修正後 `check_gpu.py`: 1080p・1,547 点 整数 10 ms / IC-GN 込み **18 ms（56 fps）**、4K・5,973 点 31 ms / 61 ms。CPU 比 8〜9 倍。CPU/GPU 差は U,V < 3e-4 px、exx < 1e-5 で一致
   - GPU 側の一般則: CuPy では要素ごとの Python ループ・多数の小さな fancy index は避け、cuFFT / cuBLAS / cupyx.ndimage の単一カーネルに寄せる
+  - CPU 側の付随修正: `np.nanmedian`（マスク配列経由で 52×94・5×5 窓に 9 ms）→ ソート＋有限個数で中央を取る `_nanmedian_last`（0.9 ms、結果はビット一致）。近傍伝播・プローブ伝播・3×3 メディアンで毎フレーム呼ばれていた
+  - GUI 内の実測（合成デモ・全画面 4,888 点・IC-GN ON）: スタンドアロン 48 ms/frame（21 fps）に対し GUI 内では 11〜12 fps。描画スレッド（`cv2.remap` ワープ＋オーバーレイ合成＋QPixmap）との GIL 競合。ROI を絞れば（実機の想定 ~1,800 点）余裕がある
+  - 合成デモを全画面 ROI で回すと、上下の試験片外（ノイズのみ）が不良点になり `frac_bad` 0.3〜0.5 で **中央値 ZNCC=1.000 のまま自動再参照が約 1 s ごとに走る**。再参照は IC-GN 参照側の再構築（約 330 ms）を伴う。デモ／実機とも ROI を試験片上に取ること
+- 依存の互換性: matplotlib 3.9 で `cm.get_cmap` が削除された → `matplotlib.colormaps[name]` に変更（main.py / rt_panel.py）。opencv-python 5.0 / numpy 2.5 / PyQt6 6.11 では問題なし
 - 全フレームを RAM 保持しない。一定間隔のスナップショット（.npz）をディスクに保存し、停止後にスライダーで見返す
 - 実測（i7-9700, CPU）: 1080p・ROI 1920×380・subset41・step20（約1,800点）で 22〜27 fps
 - カメラは Windows では `CAP_DSHOW` を使う（MSMF はオープンに 12 秒以上かかった）
