@@ -60,6 +60,14 @@
 - デモ動画は `python make_demo_movie.py`（40 秒・1080p30・MJPG avi 約 400MB、git 管理外）
 - GPU 経路は開発機に GPU が無いため未実測（numpy で同コードを通し CPU 経路と 1e-6 で一致することは確認済み）。**GPU 機では最初に `python check_gpu.py` を実行して数値一致を確認すること**
 
+### 引き継ぎ状況（2026-09-16 時点）
+- 開発は GPU 無しの i7-9700 機で行い、実機（400-CAM106・白テープ＋スプレーのスペックル・1080p 30fps）で CPU のみで追従できることを確認済み。以降は **GPU 搭載機で続きを行う**
+- GPU 機での最初の作業: `pip install cupy-cuda12x` → `python check_gpu.py` で CPU/GPU 経路の数値一致を確認 → リアルタイムマップの実機確認
+- カメラ: 400-CAM106 を採用方向（近接用・固定フォーカス・歪み小）。Insta360 Link 2C Pro は広角の樽型歪み（端で 8%）と自動機能（HDR・AF・オートフレーミング）のため不採用方向
+- 400-CAM106 の注意: 1080p は設定順序次第で非圧縮 YUY2（2.5fps）に落ちる。`CameraSource` は fps→解像度→FOURCC の順で設定済み。4K は MJPG 15fps。付属アプリ（UMviewer）を閉じないと DirectShow で開けない
+- 未対応: 2点間モードへの IC-GN 適用、レンズ歪み補正（`cv2.undistort`。Insta360 を使う場合のみ必要）
+- PineOak の Normal DIC にも `dic_icgn.py` を移植済み（同一ファイルのコピー、要同期）
+
 ---
 
 ## 実装済み機能
