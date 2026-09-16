@@ -144,6 +144,7 @@ class RTWorker(QThread):
                              X=res["X"], Y=res["Y"], U=res["U"], V=res["V"], zncc=res["zncc"],
                              exx=res["exx"], eyy=res["eyy"], exy=res["exy"],
                              rexx=res["rexx"], reyy=res["reyy"], rexy=res["rexy"],
+                             U_draw=res["U_draw"], V_draw=res["V_draw"],
                              median_zncc=res["stats"]["median_zncc"], n_reref=res["stats"]["n_reref"])
                     out["snapshot"] = str(path)
                     snap_idx += 1
@@ -750,7 +751,8 @@ class RTMapPanel(QWidget):
         if data is not None:
             follow = self.rb_pos_follow.isChecked() and res.get("U") is not None
             rgba = dic_rt.strain_to_rgba(data, vmin, vmax, res["X"], res["Y"], gray.shape, self._lut, alpha,
-                                         U=res["U"] if follow else None, V=res["V"] if follow else None)
+                                         U=res.get("U_draw", res["U"]) if follow else None,
+                                         V=res.get("V_draw", res["V"]) if follow else None)
         rgb = dic_rt.compose_overlay(gray, rgba)
         self.canvas.set_image(rgb_to_qpixmap(rgb))
 
@@ -767,6 +769,9 @@ class RTMapPanel(QWidget):
             self.lbl_review.setText(f"読込エラー: {e}")
             return
         res = {k: d[k] for k in ("X", "Y", "exx", "eyy", "exy", "U", "V")}
+        for k in ("U_draw", "V_draw"):
+            if k in d.files:
+                res[k] = d[k]
         for k in RATE_KEYS:
             res[k] = d[k] if k in d.files else np.full_like(res["exx"], np.nan)
         self._draw_result(d["gray"], res)

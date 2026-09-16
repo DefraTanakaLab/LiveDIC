@@ -139,6 +139,7 @@ class RTTracker:
         self.vel_u = np.zeros(self.N, np.float32)
         self.vel_v = np.zeros(self.N, np.float32)
         self.last_good = np.zeros(self.N, bool)
+        self.ever_good = np.zeros(self.N, bool)   # 一度でも追従できた点（描画用の変位埋めに使う）
         self.velocity_gain = 0.9     # 外挿の重み（1 で完全外挿。過大予測を避けて少し抑える）
         # 位相相関フォールバック用: 前フレームの縮小 ROI（探索範囲を超える大ジャンプの復帰に使う）
         self._prev_small: Optional[np.ndarray] = None
@@ -471,6 +472,7 @@ class RTTracker:
         self.v_total_last[good] = self.v_base[good] + v[good]
         self.t_last[good] = t
         self.last_good = good.copy()
+        self.ever_good |= good
 
         U = np.full(N, np.nan, np.float32)
         V = np.full(N, np.nan, np.float32)
@@ -508,6 +510,10 @@ class RTTracker:
         return {
             "X": self.X, "Y": self.Y,
             "U": U2, "V": V2, "zncc": Z.reshape(self.ny, self.nx),
+            # 描画（追従モード）用: 見失った点も直近の有効な総変位で埋めた変位場。
+            # 一度も追従できていない点は 0 のままなので、描画側で近傍から補う
+            "U_draw": np.where(self.valid & self.ever_good, self.u_total_last, np.nan).reshape(self.ny, self.nx).astype(np.float32),
+            "V_draw": np.where(self.valid & self.ever_good, self.v_total_last, np.nan).reshape(self.ny, self.nx).astype(np.float32),
             **strain, **rate,
             "stats": {
                 "proc_time": dt,
@@ -715,8 +721,16 @@ def warp_by_displacement(rgba_ref: np.ndarray, U: np.ndarray, V: np.ndarray,
     # NaN 点は周囲の値で埋めておく（透明セルの縁が引きつるのを防ぐ）
     fin = np.isfinite(U)
     if fin.any() and not fin.all():
-        Uf = np.where(fin, Uf, float(np.nanmedian(U))).astype(np.float32)
-        Vf = np.where(fin, Vf, float(np.nanmedian(V))).astype(np.float32)
+        # 全体中央値で埋めると周囲との段差で描画が糸状に引き伸ばされる。近傍の中央値で段階的に埋める
+        Uw = np.where(fin, U, np.nan).astype(np.float32); Vw = np.where(fin, V, np.nan).astype(np.float32)
+        for k in (3, 5, 9):
+            miss = ~np.isfinite(Uw)
+            if not miss.any():
+                break
+            mu = _nanmedian_window(Uw, k); mv = _nanmedian_window(Vw, k)
+            Uw = np.where(miss & np.isfinite(mu), mu, Uw); Vw = np.where(miss & np.isfinite(mv), mv, Vw)
+        Uf = np.where(np.isfinite(Uw), Uw, float(np.nanmedian(U))).astype(np.float32)
+        Vf = np.where(np.isfinite(Vw), Vw, float(np.nanmedian(V))).astype(np.float32)
     # グリッド → 画像全体の稠密変位場（グリッド外は最寄りの値）
     big_u = cv2.resize(Uf, (nx * step_x, ny * step_y), interpolation=cv2.INTER_LINEAR)
     big_v = cv2.resize(Vf, (nx * step_x, ny * step_y), interpolation=cv2.INTER_LINEAR)
