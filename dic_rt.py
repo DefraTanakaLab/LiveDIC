@@ -85,7 +85,7 @@ class RTTracker:
         step: int,
         roi_xyxy: Optional[Tuple[int, int, int, int]] = None,
         zncc_threshold: float = 0.2,
-        search_stages: Sequence[int] = (3, 8, 20),
+        search_stages: Sequence[int] = (10, 20, 40),
         retry_zncc: float = 0.6,
         reref_zncc: float = 0.75,
         reref_frac: float = 0.3,

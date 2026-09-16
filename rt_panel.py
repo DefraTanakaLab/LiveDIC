@@ -226,9 +226,9 @@ class RTMapPanel(QWidget):
         row2.addWidget(self.lbl_roi)
         row2.addSpacing(12)
         row2.addWidget(QLabel("探索 ±"))
-        self.sp_r1 = QSpinBox(); self.sp_r1.setRange(1, 50); self.sp_r1.setValue(3); self.sp_r1.setFixedWidth(46)
-        self.sp_r2 = QSpinBox(); self.sp_r2.setRange(0, 100); self.sp_r2.setValue(8); self.sp_r2.setFixedWidth(46)
-        self.sp_r3 = QSpinBox(); self.sp_r3.setRange(0, 200); self.sp_r3.setValue(20); self.sp_r3.setFixedWidth(46)
+        self.sp_r1 = QSpinBox(); self.sp_r1.setRange(1, 50); self.sp_r1.setValue(10); self.sp_r1.setFixedWidth(46)
+        self.sp_r2 = QSpinBox(); self.sp_r2.setRange(0, 100); self.sp_r2.setValue(20); self.sp_r2.setFixedWidth(46)
+        self.sp_r3 = QSpinBox(); self.sp_r3.setRange(0, 200); self.sp_r3.setValue(40); self.sp_r3.setFixedWidth(46)
         for sp in (self.sp_r1, self.sp_r2, self.sp_r3):
             sp.setToolTip("段階探索の半径 [px]。第1段は全点、第2・3段は相関不良点のみ。0 で無効")
         row2.addWidget(self.sp_r1); row2.addWidget(QLabel("→")); row2.addWidget(self.sp_r2)
