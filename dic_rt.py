@@ -118,7 +118,7 @@ class RTTracker:
         self.reref_frac = float(reref_frac)
         self.reref_min_interval = int(reref_min_interval)
         # 拡張探索の計算量上限（積和回数）。超える段階はそのフレームでは省略する。
-        self.mac_budget = float(mac_budget) if mac_budget else (4e9 if use_gpu else 3e8)
+        self.mac_budget = float(mac_budget) if mac_budget else (4e9 if use_gpu else 1.5e9)
 
         self.img_shape = ref_img.shape[:2]
         H, W = self.img_shape
@@ -134,6 +134,15 @@ class RTTracker:
         self.v_base = np.zeros(self.N, np.float64)
         self.u_pred = np.zeros(self.N, np.float32)
         self.v_pred = np.zeros(self.N, np.float32)
+        # 速度外挿用: 直近の良好点の (時刻, 総変位) と推定速度 [px/s]
+        self.t_last = np.full(self.N, np.nan)
+        self.vel_u = np.zeros(self.N, np.float32)
+        self.vel_v = np.zeros(self.N, np.float32)
+        self.last_good = np.zeros(self.N, bool)
+        self.velocity_gain = 0.9     # 外挿の重み（1 で完全外挿。過大予測を避けて少し抑える）
+        # 位相相関フォールバック用: 前フレームの縮小 ROI（探索範囲を超える大ジャンプの復帰に使う）
+        self._prev_small: Optional[np.ndarray] = None
+        self._small_scale = 4
         self.u_total_last = np.zeros(self.N, np.float64)   # 直近の有効な総変位
         self.v_total_last = np.zeros(self.N, np.float64)
         self.valid = np.ones(self.N, bool)                  # 永久無効点（画像外・無地）
@@ -337,8 +346,9 @@ class RTTracker:
         u = np.full(N, np.nan, np.float32)
         v = np.full(N, np.nan, np.float32)
         z = np.full(N, -1.0, np.float32)
-        iu = np.round(self.u_pred).astype(np.int64)
-        iv = np.round(self.v_pred).astype(np.int64)
+        pu, pv = self._predict(t)
+        iu = np.round(pu).astype(np.int64)
+        iv = np.round(pv).astype(np.int64)
 
         need = self.valid.copy()
         stage_counts = []
@@ -360,6 +370,55 @@ class RTTracker:
             # 相関が閾値未満、またはピークが窓の縁 → 次段で拡張探索
             need[idx] = (z[idx] < self.retry_zncc) | bs
             stage_counts.append(int(idx.size))
+
+        # ---- 復帰処理：広域探索が計算量上限で省略されたとき ----
+        # 省略された点から一様に少数（プローブ）を選んで最終段の半径で探索し、
+        # 見つかった「予測からのズレ」を近傍に伝播して残りを第2段の半径で再探索する。
+        # 一気に大きく動いた（引張機のジャンプ等）フレームでも 1 フレーム内で追従を取り戻す。
+        n_probe_used = 0
+        if skipped > 0 and len(self.stages) >= 2:
+            idx = np.nonzero(need)[0]
+            r_wide = self.stages[-1]
+            K = 2 * r_wide + 1
+            n_probe = int(max(16, min(idx.size, self.mac_budget // (K * K * S * S))))
+            probe = idx[np.linspace(0, idx.size - 1, n_probe).astype(int)]
+            us, vs, zs, bs = self._search(img, probe, iu[probe], iv[probe], r_wide)
+            better = zs > z[probe]
+            sel = probe[better]
+            u[sel] = us[better]; v[sel] = vs[better]; z[sel] = zs[better]
+            need[probe] = (z[probe] < self.retry_zncc) | bs
+            n_probe_used = int(n_probe)
+            hit = probe[(zs >= self.retry_zncc) & ~bs]
+            rest = idx[~np.isin(idx, probe)]
+            if hit.size < 4 and self._prev_small is not None:
+                # 最終段の半径でも見つからない → 位相相関で全体のズレを測り、直近変位＋ズレを中心に再探索
+                gs = self._global_shift(def_img_u8)
+                if gs is not None:
+                    sx, sy = gs
+                    iu3 = np.round(self.u_pred[idx] + sx).astype(np.int64)
+                    iv3 = np.round(self.v_pred[idx] + sy).astype(np.int64)
+                    us, vs, zs, bs = self._search(img, idx, iu3, iv3, self.stages[1])
+                    better = zs > z[idx]
+                    sel = idx[better]
+                    u[sel] = us[better]; v[sel] = vs[better]; z[sel] = zs[better]
+                    need[idx] = (z[idx] < self.retry_zncc) | bs
+                    n_probe_used = -int(abs(sx) + abs(sy))   # 負値で「位相相関で復帰」を表す
+                    rest = np.zeros(0, np.int64)
+            if hit.size >= 4 and rest.size > 0:
+                du = np.full(N, np.nan, np.float32); dv = np.full(N, np.nan, np.float32)
+                du[hit] = u[hit] - iu[hit]; dv[hit] = v[hit] - iv[hit]
+                mdu = _nanmedian_window(du.reshape(self.ny, self.nx), 9).ravel()
+                mdv = _nanmedian_window(dv.reshape(self.ny, self.nx), 9).ravel()
+                gdu = float(np.nanmedian(du[hit])); gdv = float(np.nanmedian(dv[hit]))
+                mdu = np.where(np.isfinite(mdu), mdu, gdu); mdv = np.where(np.isfinite(mdv), mdv, gdv)
+                iu2 = iu[rest] + np.round(mdu[rest]).astype(np.int64)
+                iv2 = iv[rest] + np.round(mdv[rest]).astype(np.int64)
+                r2 = self.stages[1]
+                us, vs, zs, bs = self._search(img, rest, iu2, iv2, r2)
+                better = zs > z[rest]
+                sel = rest[better]
+                u[sel] = us[better]; v[sel] = vs[better]; z[sel] = zs[better]
+                need[rest] = (z[rest] < self.retry_zncc) | bs
 
         # マッチしたサブセットが実画像の外（パディング領域）にかかる点は視野外として無効
         H, W = self.img_shape
@@ -390,10 +449,28 @@ class RTTracker:
             icgn_stats = {"icgn_frac": float(acc.sum() / max(1, good.sum())),
                           "icgn_iter": float(n_it[good].mean()) if good.any() else 0.0,
                           "icgn_time": time.perf_counter() - t_i}
+        # 速度更新（前回も良好だった点だけ。dt が極端に短いときはノイズになるので更新しない）
+        both = good & self.last_good & np.isfinite(self.t_last)
+        dt_p = t - self.t_last
+        upd = both & (dt_p > 1e-3)
+        if upd.any():
+            d_u = self.u_base[upd] + u[upd] - self.u_total_last[upd]
+            d_v = self.v_base[upd] + v[upd] - self.v_total_last[upd]
+            # 1 フレームで第2段の探索半径を超えるほど動いたのは「ジャンプ」であり速度ではない。
+            # 学習すると次フレームでさらに同量を外挿して見失うので、その点の速度はリセットする
+            r_jump = float(self.stages[1] if len(self.stages) > 1 else self.stages[0])
+            jump = (np.abs(d_u) > r_jump) | (np.abs(d_v) > r_jump)
+            new_vu = np.where(jump, 0.0, d_u / dt_p[upd])
+            new_vv = np.where(jump, 0.0, d_v / dt_p[upd])
+            # 指数平滑で暴れを抑える（ジャンプ点は即リセット）
+            self.vel_u[upd] = np.where(jump, 0.0, 0.5 * self.vel_u[upd] + 0.5 * new_vu)
+            self.vel_v[upd] = np.where(jump, 0.0, 0.5 * self.vel_v[upd] + 0.5 * new_vv)
         self.u_pred[good] = u[good]
         self.v_pred[good] = v[good]
         self.u_total_last[good] = self.u_base[good] + u[good]
         self.v_total_last[good] = self.v_base[good] + v[good]
+        self.t_last[good] = t
+        self.last_good = good.copy()
 
         U = np.full(N, np.nan, np.float32)
         V = np.full(N, np.nan, np.float32)
@@ -418,6 +495,8 @@ class RTTracker:
             self._rereference(def_img_u8)
             rerefed = True
 
+        self._prev_small = self._make_small(def_img_u8)
+
         U2 = U.reshape(self.ny, self.nx)
         V2 = V.reshape(self.ny, self.nx)
         if self.median_filter:
@@ -437,12 +516,68 @@ class RTTracker:
                 "n_points": N, "n_valid": n_valid, "n_good": n_good,
                 "stage_counts": stage_counts,
                 "skipped": skipped,
+                "probe": n_probe_used,
                 "rereferenced": rerefed,
                 "n_reref": self.n_reref,
                 "frame": self.frame_count,
                 **icgn_stats,
             },
         }
+
+    # ------------------------------------------------------------------
+    # 位相相関による全体ズレ（探索範囲を超える大ジャンプからの復帰用）
+    # ------------------------------------------------------------------
+    def _make_small(self, img_u8: np.ndarray) -> np.ndarray:
+        H, W = self.img_shape
+        m = self.half + 4
+        x0 = max(0, int(self.cx.min()) - m); x1 = min(W, int(self.cx.max()) + m + 1)
+        y0 = max(0, int(self.cy.min()) - m); y1 = min(H, int(self.cy.max()) + m + 1)
+        g = img_u8 if img_u8.ndim == 2 else cv2.cvtColor(img_u8, cv2.COLOR_BGR2GRAY)
+        crop = g[y0:y1, x0:x1]
+        k = self._small_scale
+        small = cv2.resize(crop, (max(8, crop.shape[1] // k), max(8, crop.shape[0] // k)),
+                           interpolation=cv2.INTER_AREA)
+        return small.astype(np.float32)
+
+    def _global_shift(self, img_u8: np.ndarray) -> Optional[Tuple[float, float]]:
+        """前フレーム（縮小）との位相相関で全体シフト [px] を返す。応答が弱ければ None。"""
+        cur = self._make_small(img_u8)
+        prev = self._prev_small
+        if prev is None or prev.shape != cur.shape:
+            return None
+        win = cv2.createHanningWindow((cur.shape[1], cur.shape[0]), cv2.CV_32F)
+        (dx, dy), resp = cv2.phaseCorrelate(prev, cur, win)
+        if resp < 0.1:
+            return None
+        return float(dx * self._small_scale), float(dy * self._small_scale)
+
+    # ------------------------------------------------------------------
+    # 探索中心の予測（速度外挿＋近傍伝播）
+    # ------------------------------------------------------------------
+    def _predict(self, t: float):
+        """
+        次の探索中心（現在の参照に対する変位）を返す。
+          良好点: 直近の変位 + 推定速度 × 経過時間（速度外挿）
+          不良点: 周囲 5×5 の良好点の予測値の中央値（近傍伝播）。無ければ自身の直近値
+        """
+        pu = self.u_pred.astype(np.float32).copy()
+        pv = self.v_pred.astype(np.float32).copy()
+        dt = t - self.t_last
+        ok = self.last_good & np.isfinite(dt) & (dt > 0) & (dt < 5.0)
+        if ok.any():
+            g = self.velocity_gain
+            pu[ok] += g * self.vel_u[ok] * dt[ok]
+            pv[ok] += g * self.vel_v[ok] * dt[ok]
+        bad = self.valid & ~self.last_good
+        if bad.any() and self.last_good.any():
+            gu = np.where(self.last_good, pu, np.nan).reshape(self.ny, self.nx)
+            gv = np.where(self.last_good, pv, np.nan).reshape(self.ny, self.nx)
+            mu = _nanmedian_window(gu, 5).ravel()
+            mv = _nanmedian_window(gv, 5).ravel()
+            fill = bad & np.isfinite(mu) & np.isfinite(mv)
+            pu[fill] = mu[fill]
+            pv[fill] = mv[fill]
+        return pu, pv
 
     # ------------------------------------------------------------------
     # ひずみ速度
@@ -480,6 +615,17 @@ class RTTracker:
         self._set_reference(img_u8)
         self.n_reref += 1
         self.last_reref_frame = self.frame_count
+
+
+def _nanmedian_window(a: np.ndarray, k: int) -> np.ndarray:
+    """NaN を無視する k×k メディアン（自分自身を含む）。全 NaN の窓は NaN。"""
+    ny, nx = a.shape
+    r = k // 2
+    p = np.pad(a, r, mode="constant", constant_values=np.nan)
+    stack = np.stack([p[dy:dy + ny, dx:dx + nx] for dy in range(k) for dx in range(k)], axis=-1)
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return np.nanmedian(stack, axis=-1)
 
 
 def nanmedian3(a: np.ndarray) -> np.ndarray:
