@@ -21,7 +21,7 @@ import matplotlib
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QSpinBox, QDoubleSpinBox, QRadioButton, QButtonGroup,
-    QSlider, QCheckBox, QSizePolicy,
+    QSlider, QCheckBox, QSizePolicy, QDialog, QDialogButtonBox, QFormLayout,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QPixmap, QImage
@@ -53,6 +53,50 @@ def rgb_to_qpixmap(rgb: np.ndarray) -> QPixmap:
     h, w = rgb.shape[:2]
     arr = np.ascontiguousarray(rgb)
     return QPixmap.fromImage(QImage(arr.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888))
+
+
+def _fmt_scale(v_pct: float, rate: bool) -> str:
+    """スケール値の表示。ひずみは整数 %、速度は小数 2 桁 %/s。"""
+    return f"{v_pct:.2f} %/s" if rate else f"{v_pct:.0f} %"
+
+
+class _ScaleDialog(QDialog):
+    """スケール「カスタム」選択時に最小・最大を入力する小ウィンドウ。値は % 単位。"""
+
+    def __init__(self, vmin_pct: float, vmax_pct: float, rate: bool, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("カラースケール（カスタム）")
+        self.setModal(True)
+        unit = " %/s" if rate else " %"
+        form = QFormLayout(self)
+        if rate:
+            self.sp_min = QDoubleSpinBox(); self.sp_max = QDoubleSpinBox()
+            for sp in (self.sp_min, self.sp_max):
+                sp.setDecimals(2); sp.setSingleStep(0.1); sp.setRange(-1000, 1000)
+        else:
+            # ひずみは整数 % のみ（小数点以下は不要）
+            self.sp_min = QSpinBox(); self.sp_max = QSpinBox()
+            for sp in (self.sp_min, self.sp_max):
+                sp.setRange(-1000, 1000)
+        for sp in (self.sp_min, self.sp_max):
+            sp.setSuffix(unit); sp.setMinimumWidth(110)
+        self.sp_min.setValue(round(vmin_pct) if not rate else vmin_pct)
+        self.sp_max.setValue(round(vmax_pct) if not rate else vmax_pct)
+        form.addRow("最小:", self.sp_min)
+        form.addRow("最大:", self.sp_max)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._accept); bb.rejected.connect(self.reject)
+        form.addRow(bb)
+        self.sp_max.setFocus(); self.sp_max.selectAll()
+
+    def _accept(self):
+        if self.sp_max.value() <= self.sp_min.value():
+            self.sp_max.setStyleSheet("background:#5a2a2a;")
+            return
+        self.accept()
+
+    def values_pct(self) -> Tuple[float, float]:
+        return float(self.sp_min.value()), float(self.sp_max.value())
 
 
 # ===========================================================================
@@ -261,16 +305,13 @@ class RTMapPanel(QWidget):
         for name, _, _ in SCALE_PRESETS:
             self.cb_scale.addItem(name)
         self.cb_scale.setCurrentIndex(1)
-        self.cb_scale.currentIndexChanged.connect(self._on_scale_changed)
+        # 現在のスケール（割合）と、モードごとに覚えておくカスタム値（% 単位）。
+        # 「カスタム」を選ぶと _ScaleDialog で入力し、キャンセルなら直前のプリセットに戻す
+        self._vmin, self._vmax = SCALE_PRESETS[1][1], SCALE_PRESETS[1][2]
+        self._custom_pct = {False: (0.0, 5.0), True: (0.0, 0.5)}     # key: is_rate
+        self._scale_prev_idx = 1
+        self.cb_scale.activated.connect(self._on_scale_activated)
         row3.addWidget(self.cb_scale)
-        # スケールの入力は % 単位・小数 2 桁（内部では割合に変換して使う）
-        self.sp_vmin = QDoubleSpinBox(); self.sp_vmin.setRange(-1000, 1000); self.sp_vmin.setDecimals(2)
-        self.sp_vmin.setSingleStep(0.1); self.sp_vmin.setSuffix(" %"); self.sp_vmin.setFixedWidth(84)
-        self.sp_vmax = QDoubleSpinBox(); self.sp_vmax.setRange(-1000, 1000); self.sp_vmax.setDecimals(2)
-        self.sp_vmax.setSingleStep(0.1); self.sp_vmax.setSuffix(" %"); self.sp_vmax.setFixedWidth(84)
-        self.sp_vmin.valueChanged.connect(self._request_redraw)
-        self.sp_vmax.valueChanged.connect(self._request_redraw)
-        row3.addWidget(self.sp_vmin); row3.addWidget(QLabel("–")); row3.addWidget(self.sp_vmax)
         row3.addWidget(QLabel("カラーマップ:"))
         self.cb_cmap = QComboBox(); self.cb_cmap.addItems(CMAPS)
         self.cb_cmap.currentTextChanged.connect(self._on_cmap_changed)
@@ -283,9 +324,8 @@ class RTMapPanel(QWidget):
         row3.addStretch()
         lay.addLayout(row3)
 
-        # ---- 行4：開始/停止 ----
+        # ---- 行4：開始/停止（左寄せ） ----
         row4 = QHBoxLayout()
-        row4.addStretch()
         self.btn_quality = QPushButton("🔍 品質評価")
         self.btn_quality.clicked.connect(self._quality)
         row4.addWidget(self.btn_quality)
@@ -301,6 +341,7 @@ class RTMapPanel(QWidget):
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._stop)
         row4.addWidget(self.btn_stop)
+        row4.addStretch()
         lay.addLayout(row4)
 
         # ---- ステータス ----
@@ -338,7 +379,7 @@ class RTMapPanel(QWidget):
         self._timer.start()
 
         self._populate_sources([])
-        self._on_scale_changed(self.cb_scale.currentIndex())
+        self._apply_scale_index(self.cb_scale.currentIndex())
 
     def bind_host(self):
         """host 側の設定パネル（sp_subset / sp_step）が構築された後に main.py から呼ぶ。"""
@@ -492,23 +533,42 @@ class RTMapPanel(QWidget):
             self.cb_scale.clear()
             for name, _, _ in self._presets():
                 self.cb_scale.addItem(name)
-            self.cb_scale.setCurrentIndex(min(idx, self.cb_scale.count() - 1))
+            idx = min(idx, self.cb_scale.count() - 1)
+            self.cb_scale.setCurrentIndex(idx)
             self.cb_scale.blockSignals(False)
-            self._on_scale_changed(self.cb_scale.currentIndex())
+            self._apply_scale_index(idx)
             return
         self._request_redraw()
 
-    def _on_scale_changed(self, idx: int):
-        _, vmin, vmax = self._presets()[idx]
-        custom = vmin is None
-        self.sp_vmin.setEnabled(custom)
-        self.sp_vmax.setEnabled(custom)
-        unit = " %/s" if self._is_rate() else " %"
-        self.sp_vmin.setSuffix(unit); self.sp_vmax.setSuffix(unit)
-        if not custom:
-            self.sp_vmin.blockSignals(True); self.sp_vmax.blockSignals(True)
-            self.sp_vmin.setValue(vmin * 100); self.sp_vmax.setValue(vmax * 100)
-            self.sp_vmin.blockSignals(False); self.sp_vmax.blockSignals(False)
+    def _custom_index(self) -> int:
+        return len(self._presets()) - 1
+
+    def _on_scale_activated(self, idx: int):
+        """プルダウンをユーザーが選んだとき。「カスタム」は別ウィンドウで最小・最大を入力する。"""
+        if idx == self._custom_index():
+            rate = self._is_rate()
+            cur = self._custom_pct[rate]
+            dlg = _ScaleDialog(cur[0], cur[1], rate, self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                self.cb_scale.blockSignals(True)
+                self.cb_scale.setCurrentIndex(self._scale_prev_idx)
+                self.cb_scale.blockSignals(False)
+                return
+            self._custom_pct[rate] = dlg.values_pct()
+        self._apply_scale_index(idx)
+
+    def _apply_scale_index(self, idx: int):
+        """プルダウンの idx に対応するスケールを反映する（カスタムは記憶している値を使う）。"""
+        rate = self._is_rate()
+        if idx == self._custom_index():
+            lo, hi = self._custom_pct[rate]
+            self._vmin, self._vmax = lo / 100.0, hi / 100.0
+            label = f"カスタム ({_fmt_scale(lo, rate)} – {_fmt_scale(hi, rate)})"
+        else:
+            _, self._vmin, self._vmax = self._presets()[idx]
+            label = "カスタム"
+        self.cb_scale.setItemText(self._custom_index(), label)
+        self._scale_prev_idx = idx
         self._request_redraw()
 
     def _on_cmap_changed(self, name: str):
@@ -516,17 +576,17 @@ class RTMapPanel(QWidget):
         self._request_redraw()
 
     def _scale(self) -> Tuple[float, float]:
-        """表示スケール（割合）。スピンボックスは % 表示なので /100。"""
-        return self.sp_vmin.value() / 100.0, self.sp_vmax.value() / 100.0
+        """表示スケール（割合）。"""
+        return self._vmin, self._vmax
 
     def _update_colorbar(self):
         vmin, vmax = self._scale()
         grad = np.arange(256, dtype=np.uint8)
         rgb = np.repeat(self._lut[grad][None, :, :], 14, axis=0)
         self.lbl_cbar.setPixmap(rgb_to_qpixmap(rgb))
-        unit = "%/s" if self._is_rate() else "%"
-        self.lbl_cb_min.setText(f"{vmin * 100:.2f} {unit}")
-        self.lbl_cb_max.setText(f"{vmax * 100:.2f} {unit}")
+        rate = self._is_rate()
+        self.lbl_cb_min.setText(_fmt_scale(vmin * 100, rate))
+        self.lbl_cb_max.setText(_fmt_scale(vmax * 100, rate))
 
     def _request_redraw(self):
         self._latest_drawn_fid = -1
