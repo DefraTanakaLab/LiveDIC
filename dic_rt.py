@@ -138,8 +138,11 @@ class RTTracker:
         self.reref_zncc = float(reref_zncc)
         self.reref_frac = float(reref_frac)
         self.reref_min_interval = int(reref_min_interval)
-        # 拡張探索の計算量上限（積和回数）。超える段階はそのフレームでは省略する。
-        self.mac_budget = float(mac_budget) if mac_budget else (4e9 if use_gpu else 1.5e9)
+        # 拡張探索の計算量上限。超える段階はそのフレームでは省略し、プローブ復帰に回す。
+        # 単位は _search_cost() と同じ: CPU は積和回数 M·K²·S²（cv2.matchTemplate の直接相関）、
+        # GPU は gather 画素数 M·(S+2r)²（FFT 相関なので K² には比例しない）。
+        # GPU の 4e7 は RTX 5070 Ti で ROI 1,547 点・±50 全点（3.1e7）が 16 ms に収まる実測から
+        self.mac_budget = float(mac_budget) if mac_budget else (4e7 if use_gpu else 1.5e9)
 
         self.img_shape = ref_img.shape[:2]
         H, W = self.img_shape
@@ -329,6 +332,12 @@ class RTTracker:
             self._band_cache[key] = self.xp.asarray(B)
         return self._band_cache[key]
 
+    def _search_cost(self, m: int, r: int) -> float:
+        """半径 r で m 点を探索するコスト（mac_budget と同じ単位）。"""
+        if self.use_gpu:
+            return float(m) * (self.subset + 2 * r) ** 2
+        return float(m) * (2 * r + 1) ** 2 * self.subset ** 2
+
     def _search(self, img, idx: np.ndarray, iu: np.ndarray, iv: np.ndarray, r: int):
         """
         idx で指定した点を、予測 (iu,iv) を中心に ±r で探索。
@@ -401,7 +410,6 @@ class RTTracker:
             t = t0
         img = self._prep_image(def_img_u8)
         N = self.N
-        S = self.subset
 
         u = np.full(N, np.nan, np.float32)
         v = np.full(N, np.nan, np.float32)
@@ -418,8 +426,7 @@ class RTTracker:
             if idx.size == 0:
                 stage_counts.append(0)
                 continue
-            K = 2 * r + 1
-            if si > 0 and idx.size * K * K * S * S > self.mac_budget:
+            if si > 0 and self._search_cost(idx.size, r) > self.mac_budget:
                 skipped = int(idx.size)
                 stage_counts.append(0)
                 break
@@ -439,8 +446,7 @@ class RTTracker:
         if skipped > 0 and len(self.stages) >= 2:
             idx = np.nonzero(need)[0]
             r_wide = self.stages[-1]
-            K = 2 * r_wide + 1
-            n_probe = int(max(16, min(idx.size, self.mac_budget // (K * K * S * S))))
+            n_probe = int(max(16, min(idx.size, self.mac_budget // max(1.0, self._search_cost(1, r_wide)))))
             probe = idx[np.linspace(0, idx.size - 1, n_probe).astype(int)]
             us, vs, zs, bs = self._search(img, probe, iu[probe], iv[probe], r_wide)
             better = zs > z[probe]
