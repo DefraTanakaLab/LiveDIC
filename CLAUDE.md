@@ -15,6 +15,7 @@
 | `rt_source.py` | フレームソース（USBカメラ取得スレッド、合成変形デモ） |
 | `rt_panel.py` | リアルタイムマップタブの UI と解析ワーカー |
 | `make_demo_movie.py` | リアルタイムマップ用デモ動画（合成引張・くびれ帯）を `Demo_realtime/` に生成 |
+| `check_gpu.py` | GPU 機で最初に実行。CuPy の可否、GPU/CPU 経路の数値一致、処理時間を表示 |
 | `build.bat` | PyInstaller exe ビルドスクリプト |
 | `make_icon.py` | cow.png → LiveDIC.ico 変換スクリプト |
 | `requirements.txt` | 依存パッケージ |
@@ -57,7 +58,7 @@
 - カメラは Windows では `CAP_DSHOW` を使う（MSMF はオープンに 12 秒以上かかった）
 - ソースは「カメラ / 動画ファイル / 合成デモ」。コンボで選ぶ（または解像度を変える・カメラ検索が終わる・動画を開く）と即プレビューが始まる。プレビューボタンは廃止（2026-09-16）。動画ファイルは実時間ペースで再生し、解析開始時に先頭へ巻き戻して 1 回再生（プレビュー中はループ）
 - デモ動画は `python make_demo_movie.py`（40 秒・1080p30・MJPG avi 約 400MB、git 管理外）
-- GPU 経路は開発機に GPU が無いため未実測（numpy で同コードを通し CPU 経路と 1e-6 で一致することは確認済み）
+- GPU 経路は開発機に GPU が無いため未実測（numpy で同コードを通し CPU 経路と 1e-6 で一致することは確認済み）。**GPU 機では最初に `python check_gpu.py` を実行して数値一致を確認すること**
 
 ---
 
