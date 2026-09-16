@@ -786,10 +786,32 @@ def warp_by_displacement(rgba_ref: np.ndarray, U: np.ndarray, V: np.ndarray,
 
 
 def compose_overlay(gray_u8: np.ndarray, rgba: Optional[np.ndarray]) -> np.ndarray:
-    """グレー画像に RGBA オーバーレイをアルファ合成して RGB(uint8) を返す。"""
+    """
+    グレー画像に RGBA オーバーレイをアルファ合成して RGB(uint8) を返す。
+
+    1080p 全面を float32 で合成すると 60 ms かかり、解析 30 fps に対して表示が 7 fps に落ちた。
+    マップは ROI 内にしか無く α も一定値（alpha か 0）なので、非透明部分の外接矩形だけを
+    uint8 の cv2.addWeighted で合成しマスクコピーする（約 2 ms）。α が一様でない場合だけ
+    外接矩形内を float で合成する。
+    """
     rgb = cv2.cvtColor(gray_u8, cv2.COLOR_GRAY2RGB)
     if rgba is None:
         return rgb
-    a = rgba[..., 3:4].astype(np.float32) / 255.0
-    out = rgb.astype(np.float32) * (1 - a) + rgba[..., :3].astype(np.float32) * a
-    return out.astype(np.uint8)
+    a8 = np.ascontiguousarray(rgba[..., 3])
+    x, y, w, h = cv2.boundingRect(a8)          # 非ゼロ画素の外接矩形（無ければ w=h=0）
+    if w == 0 or h == 0:
+        return rgb
+    sub_rgb = rgb[y:y + h, x:x + w]
+    sub_a = a8[y:y + h, x:x + w]
+    sub_c = np.ascontiguousarray(rgba[y:y + h, x:x + w, :3])
+    amax = int(sub_a.max())
+    if amax == 0:
+        return rgb
+    if bool(((sub_a == 0) | (sub_a == amax)).all()):
+        wa = amax / 255.0
+        blend = cv2.addWeighted(sub_rgb, 1.0 - wa, sub_c, wa, 0.0)
+        cv2.copyTo(blend, sub_a, sub_rgb)                     # マスク部分だけ書き戻す（in-place）
+    else:
+        a = sub_a[..., None].astype(np.float32) / 255.0
+        sub_rgb[:] = (sub_rgb.astype(np.float32) * (1 - a) + sub_c.astype(np.float32) * a).astype(np.uint8)
+    return rgb

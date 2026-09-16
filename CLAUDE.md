@@ -61,6 +61,8 @@
   - GPU 側の一般則: CuPy では要素ごとの Python ループ・多数の小さな fancy index は避け、cuFFT / cuBLAS / cupyx.ndimage の単一カーネルに寄せる
   - CPU 側の付随修正: `np.nanmedian`（マスク配列経由で 52×94・5×5 窓に 9 ms）→ ソート＋有限個数で中央を取る `_nanmedian_last`（0.9 ms、結果はビット一致）。近傍伝播・プローブ伝播・3×3 メディアンで毎フレーム呼ばれていた
   - GUI 内の実測（`SyntheticSource` を UI に流し込んで計測・全画面 4,888 点・IC-GN ON）: スタンドアロン 48 ms/frame（21 fps）に対し GUI 内では 11〜12 fps。描画スレッド（`cv2.remap` ワープ＋オーバーレイ合成＋QPixmap）との GIL 競合。ROI を絞れば（実機の想定 ~1,800 点）余裕がある
+  - **描画側の実測と修正（2026-09-16、ROI 1,547 点・IC-GN・GPU）**: 解析は 29 fps 出ているのに画面更新が 7 fps だった。`compose_overlay` が 1080p 全面を float32 で合成して 60 ms → 非透明部の外接矩形だけ uint8 `cv2.addWeighted`＋`cv2.copyTo` で 5 ms（差は丸めの 1 階調）。描画 1 回 105 → 35 ms、画面更新 19 fps。残りは追従ワープ `warp_by_displacement` 19 ms（NaN 埋めの `_nanmedian_window` 3 段＋`cv2.remap`）が最大
+  - 別ウィンドウ表示の追加負荷: 横 +3 ms/描画、縦回転 +5 ms（`cv2.rotate`。`np.rot90`＋連続化は 10 ms）。解析 fps は 27.8 → 26.3（横）→ 23.8（縦）で、描画回数が増えるほど GIL 競合で解析側が少し落ちる
   - 全画面 ROI で試験片外（無地・ノイズのみ）を含めると、その点が不良になり `frac_bad` 0.3〜0.5 で **中央値 ZNCC=1.000 のまま自動再参照が約 1 s ごとに走る**。再参照は IC-GN 参照側の再構築（約 330 ms）を伴う。実機では ROI を試験片上に取ること
 - 依存の互換性: matplotlib 3.9 で `cm.get_cmap` が削除された → `matplotlib.colormaps[name]` に変更（main.py / rt_panel.py）。opencv-python 5.0 / numpy 2.5 / PyQt6 6.11 では問題なし
 - 全フレームを RAM 保持しない（最新の結果 1 つだけを描画待ちに持つ）

@@ -60,7 +60,9 @@ def _fmt_scale(v_pct: float, rate: bool) -> str:
     return f"{v_pct:.2f} %/s" if rate else f"{v_pct:.0f} %"
 
 
-ROTATIONS = [("横（そのまま）", 0), ("縦（時計回り 90°）", -1), ("縦（反時計回り 90°）", 1)]   # (表示名, np.rot90 の k)
+ROTATIONS = [("横（そのまま）", None),
+             ("縦（時計回り 90°）", cv2.ROTATE_90_CLOCKWISE),
+             ("縦（反時計回り 90°）", cv2.ROTATE_90_COUNTERCLOCKWISE)]   # (表示名, cv2.rotate のコード)
 
 
 class _FitImage(QWidget):
@@ -102,7 +104,7 @@ class RTDisplayWindow(QWidget):
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle("LiveDIC — リアルタイムマップ表示")
         self.resize(720, 1000)
-        self._rot_k = 0
+        self._rot_code: Optional[int] = None
         self._last_rgb: Optional[np.ndarray] = None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4); lay.setSpacing(3)
@@ -142,7 +144,8 @@ class RTDisplayWindow(QWidget):
 
     def set_frame(self, rgb: np.ndarray):
         self._last_rgb = rgb
-        img = np.rot90(rgb, self._rot_k) if self._rot_k else rgb
+        # cv2.rotate は SIMD で 1080p RGB を約 1 ms（np.rot90 + 連続化コピーは約 8 ms）
+        img = cv2.rotate(rgb, self._rot_code) if self._rot_code is not None else rgb
         self.view.set_pixmap(rgb_to_qpixmap(img))
 
     def set_colorbar(self, bar_rgb: np.ndarray, text_min: str, text_max: str):
@@ -154,7 +157,7 @@ class RTDisplayWindow(QWidget):
 
     # ---- 内部 ----
     def _on_rot(self, idx: int):
-        self._rot_k = ROTATIONS[idx][1]
+        self._rot_code = ROTATIONS[idx][1]
         if self._last_rgb is not None:
             self.set_frame(self._last_rgb)
 
