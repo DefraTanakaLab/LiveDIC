@@ -503,8 +503,10 @@ class RTMapPanel(QWidget):
         self.lbl_backend.setMinimumWidth(120)
 
         # ---- タイマー ----
+        # 描画は新しい結果があるときだけ行うので、周期を短くしても負荷は結果レート以上には増えない。
+        # 33 ms だと解析結果（~27 fps）との位相ずれで空振りが出て画面更新が 20 fps に落ちた
         self._timer = QTimer(self)
-        self._timer.setInterval(33)
+        self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
 
