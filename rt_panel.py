@@ -2,28 +2,26 @@
 rt_panel.py  —  LiveDIC リアルタイムマップモード（GUI タブ＋解析ワーカー）
 
   RTWorker    : フレームソースから最新フレームを取り出して RTTracker で解析する QThread
-  RTMapPanel  : 「リアルタイムマップ」タブの UI 一式（ソース選択・ROI・色スケール・記録・見返し）
+  RTMapPanel  : 「リアルタイムマップ」タブの UI 一式（ソース選択・ROI・色スケール）
+
+結果の保存（スナップショット .npz と見返しスライダー）は 2026-09-16 に廃止。保存方法は別途検討中。
 
 main.py からは RTMapPanel(host, canvas_factory) で生成する。host は
   sp_subset / sp_step（QSpinBox）, chk_icgn（QCheckBox）, _append_log(str), _show_quality(img, roi)
 を持つ MainWindow。ImageCanvas は循環 import を避けるため canvas_factory で受け取る。
 """
 from __future__ import annotations
-import os
-import json
 import time
-import pathlib
-from datetime import datetime
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, List, Tuple
 
 import numpy as np
 import cv2
 import matplotlib
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QSpinBox, QDoubleSpinBox, QRadioButton, QButtonGroup,
-    QSlider, QCheckBox, QFileDialog, QGroupBox, QGridLayout, QSizePolicy,
+    QSlider, QCheckBox, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QPixmap, QImage
@@ -67,14 +65,11 @@ class RTWorker(QThread):
     sig_error = pyqtSignal(str)
 
     def __init__(self, source: rt_source.FrameSource, ref_gray: np.ndarray,
-                 tracker_kwargs: dict, snapshot_dir: Optional[pathlib.Path],
-                 snapshot_interval: float, parent=None):
+                 tracker_kwargs: dict, parent=None):
         super().__init__(parent)
         self.source = source
         self.ref_gray = ref_gray
         self.kw = tracker_kwargs
-        self.snap_dir = snapshot_dir
-        self.snap_interval = float(snapshot_interval)
         self._stop = False
         self.tracker: Optional[dic_rt.RTTracker] = None
 
@@ -94,19 +89,9 @@ class RTWorker(QThread):
         last_id = -1
         n_proc = 0
         n_skip = 0
-        last_snap = -1e9
-        snap_idx = 0
         fps_t0 = time.perf_counter()
         fps_n = 0
         proc_fps = 0.0
-        if self.snap_dir is not None:
-            self.snap_dir.mkdir(parents=True, exist_ok=True)
-            meta = {"start": datetime.now().isoformat(), "subset": tr.subset, "step": tr.step,
-                    "n_points": int(tr.N), "grid": [int(tr.ny), int(tr.nx)],
-                    "backend": dic_rt.backend_name(tr.use_gpu), "img_shape": list(tr.img_shape)}
-            (self.snap_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
-                                                     encoding="utf-8")
-            cv2.imencode(".png", self.ref_gray)[1].tofile(str(self.snap_dir / "reference.png"))
 
         while not self._stop:
             fr = self.source.latest()
@@ -133,24 +118,10 @@ class RTWorker(QThread):
             elapsed = ts - t_start
             out = {"fid": fid, "elapsed": elapsed, "gray": gray, "res": res,
                    "proc_fps": proc_fps, "n_proc": n_proc, "n_skip": n_skip,
-                   "src_fps": self.source.fps, "snapshot": None}
+                   "src_fps": self.source.fps}
             if res["stats"]["rereferenced"]:
                 self.sig_log.emit(f"  自動再参照 #{res['stats']['n_reref']}  "
                                   f"(t={elapsed:.1f}s, 中央値ZNCC={res['stats']['median_zncc']:.3f})")
-            if self.snap_dir is not None and self.snap_interval > 0 and elapsed - last_snap >= self.snap_interval:
-                last_snap = elapsed
-                path = self.snap_dir / f"snap_{snap_idx:05d}.npz"
-                try:
-                    np.savez(str(path), gray=gray, elapsed=elapsed, fid=fid,
-                             X=res["X"], Y=res["Y"], U=res["U"], V=res["V"], zncc=res["zncc"],
-                             exx=res["exx"], eyy=res["eyy"], exy=res["exy"],
-                             rexx=res["rexx"], reyy=res["reyy"], rexy=res["rexy"],
-                             U_draw=res["U_draw"], V_draw=res["V_draw"],
-                             median_zncc=res["stats"]["median_zncc"], n_reref=res["stats"]["n_reref"])
-                    out["snapshot"] = str(path)
-                    snap_idx += 1
-                except Exception as e:
-                    self.sig_error.emit(f"スナップショット保存エラー: {e}")
             self.sig_result.emit(out)
         self.sig_log.emit(f"リアルタイム解析停止: 処理 {n_proc} フレーム / 間引き {n_skip} フレーム / 再参照 {tr.n_reref} 回")
 
@@ -170,8 +141,6 @@ class RTMapPanel(QWidget):
         self._latest_drawn_fid = -1
         self._preview_fid = -1
         self._ref_gray: Optional[np.ndarray] = None
-        self._snapshots: List[str] = []
-        self._review_mode = False
         self._lut = _lut(CMAPS[0])
         self._comp = "exx"
         self._cam_list: List[Tuple[int, str]] = []
@@ -314,20 +283,9 @@ class RTMapPanel(QWidget):
         row3.addStretch()
         lay.addLayout(row3)
 
-        # ---- 行4：記録 ＋ 開始/停止 ----
+        # ---- 行4：開始/停止 ----
         row4 = QHBoxLayout()
-        row4.addWidget(QLabel("スナップショット間隔:"))
-        self.sp_snap = QDoubleSpinBox(); self.sp_snap.setRange(0, 3600); self.sp_snap.setValue(5.0)
-        self.sp_snap.setDecimals(1); self.sp_snap.setSuffix(" s"); self.sp_snap.setFixedWidth(70)
-        self.sp_snap.setSpecialValueText("記録なし")
-        row4.addWidget(self.sp_snap)
-        row4.addWidget(QLabel("保存先:"))
-        self.edit_dir = QLineEdit()
-        self.edit_dir.setPlaceholderText("スナップショット保存フォルダ（試験ごとにサブフォルダを作成）")
-        row4.addWidget(self.edit_dir, stretch=1)
-        btn_dir = QPushButton("…"); btn_dir.setFixedWidth(28)
-        btn_dir.clicked.connect(self._browse_dir)
-        row4.addWidget(btn_dir)
+        row4.addStretch()
         self.btn_quality = QPushButton("🔍 品質評価")
         self.btn_quality.clicked.connect(self._quality)
         row4.addWidget(self.btn_quality)
@@ -367,30 +325,11 @@ class RTMapPanel(QWidget):
         cb_row.addWidget(self.lbl_cb_min); cb_row.addWidget(self.lbl_cbar, stretch=1); cb_row.addWidget(self.lbl_cb_max)
         lay.addLayout(cb_row)
 
-        # ---- 見返しスライダー ----
-        rv = QHBoxLayout()
-        rv.addWidget(QLabel("見返し:"))
-        self.sl_review = QSlider(Qt.Orientation.Horizontal)
-        self.sl_review.setRange(0, 0)
-        self.sl_review.setEnabled(False)
-        self.sl_review.valueChanged.connect(self._on_review_slider)
-        rv.addWidget(self.sl_review, stretch=1)
-        self.lbl_review = QLabel("—")
-        self.lbl_review.setStyleSheet("color:#888;font-size:9px;")
-        rv.addWidget(self.lbl_review)
-        self.btn_live = QPushButton("ライブに戻る")
-        self.btn_live.setEnabled(False)
-        self.btn_live.clicked.connect(self._back_to_live)
-        rv.addWidget(self.btn_live)
-        lay.addLayout(rv)
-
         # 長文ラベルがウィンドウ最小幅を押し広げないようにする（QLabel は文字列幅を最小幅にする）
-        for lbl in (self.lbl_status, self.lbl_params, self.lbl_roi, self.lbl_review, self.lbl_backend):
+        for lbl in (self.lbl_status, self.lbl_params, self.lbl_roi, self.lbl_backend):
             lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             lbl.setMinimumWidth(1)
-        self.lbl_review.setMinimumWidth(180)
         self.lbl_backend.setMinimumWidth(120)
-        self.edit_dir.setMinimumWidth(1)
 
         # ---- タイマー ----
         self._timer = QTimer(self)
@@ -465,7 +404,7 @@ class RTMapPanel(QWidget):
         if self._worker is not None:
             return
         self._stop_source()
-        self._back_to_live()
+        self._reset_view()
         data = self.cb_source.currentData()
         if data is None:
             return
@@ -522,11 +461,6 @@ class RTMapPanel(QWidget):
                                     f"→ {X.size} 点 ({X.shape[0]}×{X.shape[1]})")
         except Exception:
             self.lbl_params.setText("グリッド生成不可")
-
-    def _browse_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "スナップショット保存フォルダを選択")
-        if d:
-            self.edit_dir.setText(d)
 
     def _quality(self):
         img = None
@@ -597,8 +531,11 @@ class RTMapPanel(QWidget):
     def _request_redraw(self):
         self._latest_drawn_fid = -1
         self._update_colorbar()
-        if self._review_mode:
-            self._on_review_slider(self.sl_review.value())
+
+    def _reset_view(self):
+        """ソース切替・解析開始時に描画済みフレームの記録をリセットする。"""
+        self._latest_drawn_fid = -1
+        self._preview_fid = -1
 
     # ------------------------------------------------------------------
     # 開始 / 停止
@@ -623,21 +560,11 @@ class RTMapPanel(QWidget):
         if self._source is None or self._source.latest() is None:
             self.lbl_status.setText("フレームがまだ来ていません")
             return
-        self._back_to_live()
+        self._reset_view()
         fid, ts, gray = self._source.latest()
         self._ref_gray = gray.copy()
-        snap_dir = None
-        if self.sp_snap.value() > 0:
-            base = self.edit_dir.text().strip()
-            if not base:
-                base = str(pathlib.Path.home() / "LiveDIC_RT")
-                self.edit_dir.setText(base)
-            snap_dir = pathlib.Path(base) / datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._snapshots = []
-        self.sl_review.setRange(0, 0); self.sl_review.setEnabled(False); self.btn_live.setEnabled(False)
         try:
-            self._worker = RTWorker(self._source, self._ref_gray, self._tracker_kwargs(),
-                                    snap_dir, self.sp_snap.value(), self)
+            self._worker = RTWorker(self._source, self._ref_gray, self._tracker_kwargs(), self)
         except Exception as e:
             self.lbl_status.setText(f"開始エラー: {e}")
             return
@@ -652,8 +579,7 @@ class RTMapPanel(QWidget):
                     self.sp_zncc, self.sp_reref, self.chk_gpu, self.btn_scan,
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.host.chk_icgn):
             wdg.setEnabled(False)
-        self.host._append_log(f"参照取得: フレーム {fid}  スナップショット: "
-                              f"{snap_dir if snap_dir else 'なし'}")
+        self.host._append_log(f"参照取得: フレーム {fid}")
 
     def _stop(self):
         if self._worker is None:
@@ -668,10 +594,6 @@ class RTMapPanel(QWidget):
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.host.chk_icgn):
             wdg.setEnabled(True)
         self.chk_gpu.setEnabled(dic_rt.gpu_available())
-        if self._snapshots:
-            self.sl_review.setRange(0, len(self._snapshots) - 1)
-            self.sl_review.setEnabled(True)
-            self.btn_live.setEnabled(True)
         self.lbl_status.setText("解析停止")
 
     def shutdown(self):
@@ -685,12 +607,8 @@ class RTMapPanel(QWidget):
     # ------------------------------------------------------------------
     def _on_result(self, out: dict):
         self._latest = out
-        if out.get("snapshot"):
-            self._snapshots.append(out["snapshot"])
 
     def _tick(self):
-        if self._review_mode:
-            return
         if self._worker is not None and self._latest is not None:
             out = self._latest
             if out["fid"] == self._latest_drawn_fid:
@@ -707,7 +625,6 @@ class RTMapPanel(QWidget):
                 f"{' 復帰:位相相関' if st.get('probe', 0) < 0 else ''} "
                 f"{' | IC-GN ' + format(st['icgn_frac'] * 100, '.0f') + '% ' + format(st['icgn_iter'], '.1f') + '反復 ' + format(st['icgn_time'] * 1000, '.0f') + 'ms' if 'icgn_frac' in st else ''}"
                 f"| 再参照 {st['n_reref']} 回 | 経過 {out['elapsed']:.1f} s"
-                f"{' | 📷' + str(len(self._snapshots)) if self._snapshots else ''}"
                 f"{' | 動画終了' if getattr(self._source, 'finished', False) else ''}")
         elif self._source is not None:
             fr = self._source.latest()
@@ -739,33 +656,6 @@ class RTMapPanel(QWidget):
         rgb = dic_rt.compose_overlay(gray, rgba)
         self.canvas.set_image(rgb_to_qpixmap(rgb))
 
-    # ------------------------------------------------------------------
-    # 見返し
-    # ------------------------------------------------------------------
-    def _on_review_slider(self, idx: int):
-        if not self._snapshots or idx < 0 or idx >= len(self._snapshots):
-            return
-        self._review_mode = True
-        try:
-            d = np.load(self._snapshots[idx])
-        except Exception as e:
-            self.lbl_review.setText(f"読込エラー: {e}")
-            return
-        res = {k: d[k] for k in ("X", "Y", "exx", "eyy", "exy", "U", "V")}
-        for k in ("U_draw", "V_draw"):
-            if k in d.files:
-                res[k] = d[k]
-        for k in RATE_KEYS:
-            res[k] = d[k] if k in d.files else np.full_like(res["exx"], np.nan)
-        self._draw_result(d["gray"], res)
-        self.lbl_review.setText(f"{idx + 1}/{len(self._snapshots)}  t={float(d['elapsed']):.1f}s  "
-                                f"ZNCC={float(d['median_zncc']):.3f}  再参照={int(d['n_reref'])}")
-
-    def _back_to_live(self):
-        self._review_mode = False
-        self._latest_drawn_fid = -1
-        self._preview_fid = -1
-        self.lbl_review.setText("—")
 
 class _ScanThread(QThread):
     done = pyqtSignal(list)
