@@ -665,10 +665,13 @@ def strain_to_rgba(
     data: np.ndarray, vmin: float, vmax: float,
     X: np.ndarray, Y: np.ndarray, img_shape: Tuple[int, int],
     lut: np.ndarray, alpha: int = 160,
+    U: Optional[np.ndarray] = None, V: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     グリッド値をセル（step×step）に最近傍拡大して元画像サイズの RGBA(uint8) を返す。
     lut: (256,3) uint8 のカラーマップ。NaN は透明。
+    U, V を渡すと、参照位置に描いたマップを変位で変形後の位置へ写す（材料に追従した描画。
+    セルは伸びに合わせて広がる）。渡さなければ参照時点の位置に固定して描く。
     """
     H, W = img_shape[:2]
     ny, nx = data.shape
@@ -690,6 +693,55 @@ def strain_to_rgba(
     bx1, by1 = min(W, x0 + big.shape[1]), min(H, y0 + big.shape[0])
     if bx1 > bx0 and by1 > by0:
         out[by0:by1, bx0:bx1] = big[by0 - y0:by1 - y0, bx0 - x0:bx1 - x0]
+    if U is None or V is None:
+        return out
+    return warp_by_displacement(out, U, V, X, Y)
+
+
+def warp_by_displacement(rgba_ref: np.ndarray, U: np.ndarray, V: np.ndarray,
+                         X: np.ndarray, Y: np.ndarray) -> np.ndarray:
+    """
+    参照位置に描いた RGBA を、グリッドの変位 (U,V) で変形後の位置へ写す。
+    出力画素 (x,y) の色 = 入力の (x - U(x,y), y - V(x,y))。変位場はグリッドから
+    画像全体へ線形補間で広げる（変形後の位置で参照変位を引く近似。表示用途では十分）。
+    """
+    H, W = rgba_ref.shape[:2]
+    ny, nx = U.shape
+    xs = X[0, :].astype(int); ys = Y[:, 0].astype(int)
+    step_x = int(xs[1] - xs[0]) if nx > 1 else 20
+    step_y = int(ys[1] - ys[0]) if ny > 1 else 20
+    Uf = np.nan_to_num(U, nan=0.0).astype(np.float32)
+    Vf = np.nan_to_num(V, nan=0.0).astype(np.float32)
+    # NaN 点は周囲の値で埋めておく（透明セルの縁が引きつるのを防ぐ）
+    fin = np.isfinite(U)
+    if fin.any() and not fin.all():
+        Uf = np.where(fin, Uf, float(np.nanmedian(U))).astype(np.float32)
+        Vf = np.where(fin, Vf, float(np.nanmedian(V))).astype(np.float32)
+    # グリッド → 画像全体の稠密変位場（グリッド外は最寄りの値）
+    big_u = cv2.resize(Uf, (nx * step_x, ny * step_y), interpolation=cv2.INTER_LINEAR)
+    big_v = cv2.resize(Vf, (nx * step_x, ny * step_y), interpolation=cv2.INTER_LINEAR)
+    x0 = int(xs[0] - step_x // 2); y0 = int(ys[0] - step_y // 2)
+    pad_l, pad_t = max(0, x0), max(0, y0)
+    pad_r = max(0, W - (x0 + big_u.shape[1])); pad_b = max(0, H - (y0 + big_u.shape[0]))
+    dense_u = cv2.copyMakeBorder(big_u, pad_t, pad_b, pad_l, pad_r, cv2.BORDER_REPLICATE)[:H, :W]
+    dense_v = cv2.copyMakeBorder(big_v, pad_t, pad_b, pad_l, pad_r, cv2.BORDER_REPLICATE)[:H, :W]
+    if dense_u.shape != (H, W):   # グリッドが画像外へはみ出す場合の保険
+        dense_u = cv2.resize(dense_u, (W, H)); dense_v = cv2.resize(dense_v, (W, H))
+    # 出力が非透明になり得る範囲（参照セル範囲 ± 変位の最大）だけ remap する（1080p 全面だと 60ms）
+    umin, umax = float(np.nanmin(Uf)), float(np.nanmax(Uf))
+    vmin_, vmax_ = float(np.nanmin(Vf)), float(np.nanmax(Vf))
+    ox0 = max(0, int(np.floor(x0 + min(0.0, umin))) - 2)
+    ox1 = min(W, int(np.ceil(x0 + big_u.shape[1] + max(0.0, umax))) + 2)
+    oy0 = max(0, int(np.floor(y0 + min(0.0, vmin_))) - 2)
+    oy1 = min(H, int(np.ceil(y0 + big_u.shape[0] + max(0.0, vmax_))) + 2)
+    out = np.zeros_like(rgba_ref)
+    if ox1 <= ox0 or oy1 <= oy0:
+        return out
+    yy, xx = np.mgrid[oy0:oy1, ox0:ox1].astype(np.float32)
+    map_x = xx - dense_u[oy0:oy1, ox0:ox1]
+    map_y = yy - dense_v[oy0:oy1, ox0:ox1]
+    out[oy0:oy1, ox0:ox1] = cv2.remap(rgba_ref, map_x, map_y, cv2.INTER_NEAREST,
+                                      borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
     return out
 
 

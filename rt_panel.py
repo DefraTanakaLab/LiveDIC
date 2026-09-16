@@ -273,6 +273,17 @@ class RTMapPanel(QWidget):
         self.sp_rate_win.setDecimals(1); self.sp_rate_win.setSuffix(" s"); self.sp_rate_win.setFixedWidth(60)
         self.sp_rate_win.setToolTip("ひずみ速度の計算窓。短いほど応答が速くノイズが増える")
         row3.addWidget(QLabel("速度窓:")); row3.addWidget(self.sp_rate_win)
+        row3.addSpacing(12)
+        row3.addWidget(QLabel("描画位置:"))
+        self._pos_bg = QButtonGroup(self)
+        self.rb_pos_follow = QRadioButton("追従")
+        self.rb_pos_follow.setToolTip("各セルを変形後の位置に描く（ライブ映像の材料点と一致。セルは伸びに合わせて広がる）")
+        self.rb_pos_ref = QRadioButton("参照位置")
+        self.rb_pos_ref.setToolTip("各セルを参照画像上の位置に固定して描く（マップは動かない）")
+        self.rb_pos_follow.setChecked(True)
+        for rb in (self.rb_pos_follow, self.rb_pos_ref):
+            self._pos_bg.addButton(rb); row3.addWidget(rb)
+            rb.toggled.connect(lambda c: self._request_redraw() if c else None)
         self.chk_rate_smooth = QCheckBox("速度平滑化")
         self.chk_rate_smooth.setChecked(True)
         self.chk_rate_smooth.setToolTip("速度マップに 3×3 平均フィルタ。サブピクセル誤差由来の縞を抑えるが局所ピークは鈍る")
@@ -737,7 +748,9 @@ class RTMapPanel(QWidget):
         alpha = int(self.sl_alpha.value() * 2.55)
         rgba = None
         if data is not None:
-            rgba = dic_rt.strain_to_rgba(data, vmin, vmax, res["X"], res["Y"], gray.shape, self._lut, alpha)
+            follow = self.rb_pos_follow.isChecked() and res.get("U") is not None
+            rgba = dic_rt.strain_to_rgba(data, vmin, vmax, res["X"], res["Y"], gray.shape, self._lut, alpha,
+                                         U=res["U"] if follow else None, V=res["V"] if follow else None)
         rgb = dic_rt.compose_overlay(gray, rgba)
         self.canvas.set_image(rgb_to_qpixmap(rgb))
 
@@ -753,7 +766,7 @@ class RTMapPanel(QWidget):
         except Exception as e:
             self.lbl_review.setText(f"読込エラー: {e}")
             return
-        res = {k: d[k] for k in ("X", "Y", "exx", "eyy", "exy")}
+        res = {k: d[k] for k in ("X", "Y", "exx", "eyy", "exy", "U", "V")}
         for k in RATE_KEYS:
             res[k] = d[k] if k in d.files else np.full_like(res["exx"], np.nan)
         self._draw_result(d["gray"], res)
