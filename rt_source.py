@@ -105,11 +105,13 @@ class CameraSource(FrameSource):
             self.error = f"カメラ {self.index} を開けません"
             return
         try:
-            if self.fourcc:
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.fourcc))
+            # 設定順序が重要。400-CAM106 は FOURCC→解像度 の順だと 1080p が非圧縮 YUY2（2.5fps）に
+            # 落ちるが、fps→解像度→FOURCC の順なら MJPG 30fps が選ばれる（2026-09-16 実測）
+            cap.set(cv2.CAP_PROP_FPS, self.req_fps)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.req_w)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.req_h)
-            cap.set(cv2.CAP_PROP_FPS, self.req_fps)
+            if self.fourcc:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.fourcc))
             self.actual = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
                            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
                            float(cap.get(cv2.CAP_PROP_FPS)))
