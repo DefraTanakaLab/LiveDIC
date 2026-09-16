@@ -12,7 +12,7 @@ IC（逆合成）の利点: ヘッセ行列と最急降下画像は参照側で 
 
 補間は CPU/GPU とも 3 次 B-spline（係数化してから 16 タップ）。
   CPU (numpy) : scipy.ndimage.map_coordinates をスレッド並列（GIL を解放するので 8 本で約 6 倍）
-  GPU (CuPy)  : cupyx spline_filter で係数化 → xp の fancy index で 16 タップ gather
+  GPU (CuPy)  : cupyx spline_filter で係数化 → cupyx map_coordinates（単一カーネル）
 cv2.remap は座標を 1/32 px に量子化するため IC-GN の収束に使えない（検証済み）。
 係数化（spline_filter）は 1080p 全面で約 40 ms かかるので、ROI の外接矩形に限定して行う。
 """
@@ -146,7 +146,8 @@ class ICGNRefiner:
             H, W = self.img_shape
             self.bx0 = int(max(0, bbox[0])); self.by0 = int(max(0, bbox[1]))
             self.bx1 = int(min(W, bbox[2])); self.by1 = int(min(H, bbox[3]))
-        g = self._as_f32(def_img)[self.by0:self.by1, self.bx0:self.bx1]
+        # 切り出してから float32 化（4K 全面の変換は 8 ms かかる）
+        g = self._as_f32(_to_numpy(def_img)[self.by0:self.by1, self.bx0:self.bx1])
         if self.xp is np:
             self._coef = _ndi.spline_filter(np.ascontiguousarray(g), order=3, output=np.float32, mode="mirror")
         else:
@@ -173,29 +174,12 @@ class ICGNRefiner:
                 bnd = np.linspace(0, M, nt + 1).astype(int)
                 list(self._pool.map(lambda k: work(bnd[k], bnd[k + 1]), range(nt)))
             return out
+        # GPU: cupyx の map_coordinates（単一カーネル）。xp の fancy index で 16 タップを
+        # 手書き gather すると 1080p・1,547 点で 11 ms かかった（同 0.3 ms、差 5e-7）
         xp = self.xp
-        c = self._coef
-        H, W = c.shape
-        ix = xp.floor(X); iy = xp.floor(Y)
-        tx = (X - ix).astype(xp.float32); ty = (Y - iy).astype(xp.float32)
-        ix = ix.astype(xp.int64); iy = iy.astype(xp.int64)
-
-        def wts(t):
-            t2 = t * t; t3 = t2 * t
-            return ((1 - t) ** 3 / 6.0,
-                    (3 * t3 - 6 * t2 + 4) / 6.0,
-                    (-3 * t3 + 3 * t2 + 3 * t + 1) / 6.0,
-                    t3 / 6.0)
-        wx = wts(tx); wy = wts(ty)
-        out = xp.zeros(X.shape, xp.float32)
-        for j in range(4):
-            ry = xp.clip(iy + (j - 1), 0, H - 1)
-            row = xp.zeros(X.shape, xp.float32)
-            for i in range(4):
-                rx = xp.clip(ix + (i - 1), 0, W - 1)
-                row += wx[i] * c[ry, rx]
-            out += wy[j] * row
-        return out
+        coords = xp.stack([Y.ravel(), X.ravel()])
+        return _cpx_ndi.map_coordinates(self._coef, coords, order=3, prefilter=False,
+                                        mode="nearest", output=xp.float32).reshape(X.shape)
 
     # ------------------------------------------------------------------
     def refine(self, p0: np.ndarray, mask: Optional[np.ndarray] = None

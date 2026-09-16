@@ -24,7 +24,7 @@ def main():
     print(f"CuPy/GPU: {'利用可 → ' + dic_rt.backend_name(True) if dic_rt.gpu_available() else '利用不可'}")
     if not dic_rt.gpu_available():
         print(f"  理由: {dic_rt.gpu_error() or 'cupy が import できない'}")
-        print("  pip install cupy-cuda12x を実行し、nvidia-smi で CUDA 12.x 以降のドライバを確認してください。")
+        print('  pip install "cupy-cuda12x[ctk]" を実行し、nvidia-smi で CUDA 12.x 以降のドライバを確認してください。')
         print("  RTX 50 系 (Blackwell, sm_120) は CUDA 12.8 以降に対応した CuPy が必要です。")
         return 1
 

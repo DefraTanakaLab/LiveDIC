@@ -53,15 +53,21 @@
 - 2点間モードには未適用（`compute_single_point` は従来のまま）
 - GUI: 左パネル「IC-GN 精密化」1 つでマップモード・リアルタイムの両方を制御（サブセット・ステップと同じ共有パラメータ）。既定 ON。タブ内にあった重複チェックは 2026-09-16 に削除
 - GPU/CPU は `dic_rt.py` の `xp`（CuPy or NumPy）で同一コード。CPU 経路のみ `cv2.matchTemplate` のスレッド並列（4本で頭打ち）
+- **GPU 経路の実測と修正（2026-09-16、RTX 5070 Ti Laptop / Ryzen 9 8945HX）**: 初回実測では整数探索が CPU より遅かった（1080p 30→58 ms）。原因は 2 つで、いずれも「小さいカーネルを Python ループで大量に起動」していたこと
+  - `dic_rt._zncc_maps_gpu` の分子: K×K 回の `einsum`（44 ms）→ cuFFT のバッチ相互相関（0.9 ms）。参照側 FFT は再参照まで `_ref_fft_cache` に保持
+  - `dic_icgn._sample` の GPU 側: fancy index 16 タップ手書き gather（11 ms）→ `cupyx.scipy.ndimage.map_coordinates`（0.3 ms）
+  - 修正後 `check_gpu.py`: 1080p・1,547 点 整数 10 ms / IC-GN 込み **18 ms（56 fps）**、4K・5,973 点 31 ms / 61 ms。CPU 比 8〜9 倍。CPU/GPU 差は U,V < 3e-4 px、exx < 1e-5 で一致
+  - GPU 側の一般則: CuPy では要素ごとの Python ループ・多数の小さな fancy index は避け、cuFFT / cuBLAS / cupyx.ndimage の単一カーネルに寄せる
 - 全フレームを RAM 保持しない。一定間隔のスナップショット（.npz）をディスクに保存し、停止後にスライダーで見返す
 - 実測（i7-9700, CPU）: 1080p・ROI 1920×380・subset41・step20（約1,800点）で 22〜27 fps
 - カメラは Windows では `CAP_DSHOW` を使う（MSMF はオープンに 12 秒以上かかった）
 - ソースは UI 上はカメラのみ。タブを初めて開いたときに自動でカメラ検索し、見つかった最初のカメラでプレビューが始まる。コンボで選ぶ・解像度を変えるでも再オープン。プレビューボタン、合成デモ、動画ファイルソース、デモ動画生成は 2026-09-16 に UI から削除（`rt_source.SyntheticSource` / `VideoFileSource` は `check_gpu.py` と回帰テスト用にコードだけ残す）
-- GPU 経路は開発機に GPU が無いため未実測（numpy で同コードを通し CPU 経路と 1e-6 で一致することは確認済み）。**GPU 機では最初に `python check_gpu.py` を実行して数値一致を確認すること**
+- GPU 経路を変更したら `python check_gpu.py`（と `--4k`）で CPU との数値一致を確認すること
 
 ### 引き継ぎ状況（2026-09-16 時点）
-- 開発は GPU 無しの i7-9700 機で行い、実機（400-CAM106・白テープ＋スプレーのスペックル・1080p 30fps）で CPU のみで追従できることを確認済み。以降は **GPU 搭載機で続きを行う**
-- GPU 機での最初の作業: `pip install cupy-cuda12x` → `python check_gpu.py` で CPU/GPU 経路の数値一致を確認 → リアルタイムマップの実機確認
+- 開発は GPU 無しの i7-9700 機で行い、実機（400-CAM106・白テープ＋スプレーのスペックル・1080p 30fps）で CPU のみで追従できることを確認済み。以降は **GPU 搭載機（Ryzen 9 8945HX + RTX 5070 Ti Laptop、Python 3.13、`C:\tools\LiveDIC`）で続きを行う**
+- GPU 機のセットアップ済み: `pip install -r requirements.txt` と `pip install "cupy-cuda12x[ctk]"`。**CuPy 14 系は CUDA ヘッダを要求する**ので `[ctk]` 付き（pip の cuda-toolkit 12.9 wheel が入る）。素の `cupy-cuda12x` だけでは「Failed to find CUDA headers」で GPU 不可になる。起動時の「CUDA path could not be detected」UserWarning は無害
+- `check_gpu.py` で数値一致を確認済み、GPU 経路の性能修正済み（上記）。残りはリアルタイムマップの実機確認（400-CAM106 で GPU バックエンド表示・追従・fps）
 - カメラ: 400-CAM106 を採用方向（近接用・固定フォーカス・歪み小）。Insta360 Link 2C Pro は広角の樽型歪み（端で 8%）と自動機能（HDR・AF・オートフレーミング）のため不採用方向
 - 400-CAM106 の注意: 1080p は設定順序次第で非圧縮 YUY2（2.5fps）に落ちる。`CameraSource` は fps→解像度→FOURCC の順で設定済み。4K は MJPG 15fps。付属アプリ（UMviewer）を閉じないと DirectShow で開けない
 - 未対応: 2点間モードへの IC-GN 適用、レンズ歪み補正（`cv2.undistort`。Insta360 を使う場合のみ必要）

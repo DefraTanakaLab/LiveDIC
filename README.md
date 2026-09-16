@@ -47,12 +47,15 @@ pip install -r requirements.txt
 python main.py
 ```
 
-リアルタイムマップを GPU で動かす場合（NVIDIA GPU + CUDA 12）:
+リアルタイムマップを GPU で動かす場合（NVIDIA GPU、ドライバは CUDA 12 以降対応のもの）:
 
 ```bash
-pip install cupy-cuda12x
+pip install "cupy-cuda12x[ctk]"
+python check_gpu.py
 ```
 
+`[ctk]` で CUDA ランタイム・ヘッダも pip から入ります（CUDA Toolkit の別途インストールは不要）。
+`check_gpu.py` が「GPU 経路は CPU と一致しています」と出れば OK。
 起動時に自動判定され、タブ内の「バックエンド」に GPU 名が表示されます。
 
 ## exeをビルドする場合
