@@ -5,7 +5,7 @@ rt_panel.py  —  LiveDIC リアルタイムマップモード（GUI タブ＋�
   RTMapPanel  : 「リアルタイムマップ」タブの UI 一式（ソース選択・ROI・色スケール・記録・見返し）
 
 main.py からは RTMapPanel(host, canvas_factory) で生成する。host は
-  sp_subset / sp_step（QSpinBox）, _append_log(str), _show_quality(img, roi)
+  sp_subset / sp_step（QSpinBox）, chk_icgn（QCheckBox）, _append_log(str), _show_quality(img, roi)
 を持つ MainWindow。ImageCanvas は循環 import を避けるため canvas_factory で受け取る。
 """
 from __future__ import annotations
@@ -242,10 +242,6 @@ class RTMapPanel(QWidget):
         self.sp_reref.setValue(0.75); self.sp_reref.setDecimals(2); self.sp_reref.setFixedWidth(56)
         self.sp_reref.setToolTip("中央値ZNCCがこの値を下回ると現フレームを新しい参照にする（変位は累積）")
         row2.addWidget(self.sp_reref)
-        self.chk_icgn = QCheckBox("IC-GN")
-        self.chk_icgn.setChecked(True)
-        self.chk_icgn.setToolTip("IC-GN サブピクセル精密化（ピクセルロッキング低減）。CPU では処理時間が増える")
-        row2.addWidget(self.chk_icgn)
         self.chk_median = QCheckBox("メディアン")
         self.chk_median.setChecked(True)
         self.chk_median.setToolTip("変位場に 3×3 メディアンフィルタ（孤立した誤マッチを抑える）")
@@ -616,7 +612,7 @@ class RTMapPanel(QWidget):
             median_filter=self.chk_median.isChecked(),
             rate_window=self.sp_rate_win.value(),
             rate_smooth=3 if self.chk_rate_smooth.isChecked() else 1,
-            icgn=self.chk_icgn.isChecked(),
+            icgn=self.host.chk_icgn.isChecked(),   # 左パネル「IC-GN 精密化」（マップモードと共通）
         )
 
     def _start(self):
@@ -657,7 +653,7 @@ class RTMapPanel(QWidget):
         self.btn_stop.setEnabled(True)
         for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
                     self.sp_zncc, self.sp_reref, self.chk_median, self.chk_gpu, self.btn_scan, self.btn_video,
-                    self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.chk_icgn):
+                    self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.host.chk_icgn):
             wdg.setEnabled(False)
         self.host._append_log(f"参照取得: フレーム {fid}  スナップショット: "
                               f"{snap_dir if snap_dir else 'なし'}")
@@ -672,7 +668,7 @@ class RTMapPanel(QWidget):
         self.btn_stop.setEnabled(False)
         for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
                     self.sp_zncc, self.sp_reref, self.chk_median, self.btn_scan, self.btn_video,
-                    self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.chk_icgn):
+                    self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.host.chk_icgn):
             wdg.setEnabled(True)
         self.chk_gpu.setEnabled(dic_rt.gpu_available())
         if isinstance(self._source, rt_source.VideoFileSource):
