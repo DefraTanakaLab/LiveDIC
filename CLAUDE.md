@@ -74,8 +74,12 @@
 - `check_gpu.py` で数値一致を確認済み、GPU 経路の性能修正済み（上記）
 - **実機確認（2026-09-16、GPU 機 + 400-CAM106）**: 1080p30・ROI 1840×400・subset41・step20（1,953 点）・IC-GN ON・GPU で **処理 30 fps・間引きゼロ**（起動直後の 11 フレームのみ）、静止時の中央値 ZNCC 0.979。内蔵 Web カメラ（不良点 8% の部屋の映像）でも 12 秒・348 フレーム安定
   - **`cupyx.scipy.ndimage.map_coordinates` は mode="nearest" でも inf / 巨大座標をクランプせず `cudaErrorIllegalAddress` で CUDA コンテキストごと落ちる**（NaN は NaN を返すだけ）。実カメラでは IC-GN が発散した点の座標が流れ込み、約 4 秒で全 GPU 処理が死んだ。`dic_icgn._sample` で `nan_to_num` ＋ clip してから渡すことで解消（合成データでは発生しない。GPU 経路の変更時は必ず実カメラでも回すこと）
-  - このノート PC では内蔵 Web カメラが「カメラ 0」、400-CAM106 が「カメラ 1」（DirectShow 名 "UVC Video Device"、VID_EB1A）。タブ表示時の自動選択は最初に見つかった 0 になるので、実機ではコンボで 1 を選ぶ
-  - **カメラ取得スレッドを止めずにプロセスが終了すると 400-CAM106 が DirectShow から開けなくなる**（open に 25 秒かかって失敗、デバイス状態は OK のまま）。USB の抜き差しで復帰。LiveDIC が異常終了したときは再接続が必要
+  - このノート PC では内蔵 Web カメラが「カメラ 0」、400-CAM106 が「カメラ 1」（DirectShow 名 "UVC Video Device"、VID_EB1A）
+- **カメラの選択と名前（2026-09-16）**: `pygrabber`（comtypes）で DirectShow のデバイス名を OpenCV の CAP_DSHOW と同じ順で取り、コンボに「カメラ 1: UVC Video Device」のように表示。タブ表示時の自動選択は `rt_source.pick_default_camera`（内蔵らしい名前 = integrated / built-in / IR camera / FHD WebCam 等を避け、外付けを優先。名前が無ければ最後の番号）。pygrabber は `camera_names()` 内で `comtypes.CoInitialize()` してから列挙する（QThread から素で呼ぶと COM 未初期化で失敗して名前が空になる）。**列挙はメインスレッドで呼ばないこと**: カメラがハングしていると DirectShow の列挙自体が固まり GUI ごと止まる（`_ScanThread` 内で行う）
+- **400-CAM106 のハング（2026-09-16、未解決・ハード側）**: ストリームの開始／停止を繰り返すと **確率的（実測 2〜3 割/回）にカメラのファームウェアがハング**し、以後 DirectShow / pygrabber とも open が 25 秒かかって失敗する。原因を Python 側の終了手順（stop 忘れ・Qt ループ停止後の stop・スロット内例外・pygrabber の COM・解放後の猶予）と疑って 1 つずつ潰したが、**どれも無関係**で、例外なし・正常 stop の同一手順を繰り返しても 4 回目で固まった。`pnputil /restart-device` はデバイスが消えたまま戻らず、**USB の物理的な抜き差しでしか復帰しない**。ソフト側でできるのは開閉回数を減らすことだけ:
+  - カメラ検索は pygrabber の列挙のみで行い（デバイスを開かない）、開くのは本番の 1 回だけにした。名前が取れない環境だけ従来の「開いて 1 フレーム読む」検索
+  - 終了時は必ず `rt_source.stop_all_sources()` で解放（`main()` の aboutToQuit / finally / atexit）。スロット内の未捕捉例外は `sys.excepthook` でログに出してアプリを生かす（PyQt6 の既定は abort で後始末が走らない）
+  - 実験中に固まったら USB を抜き差し → LiveDIC の「カメラ検索」を押す。抜き差し後の open は 0.8 s 程度で戻る
 - カメラ: 400-CAM106 を採用方向（近接用・固定フォーカス・歪み小）。Insta360 Link 2C Pro は広角の樽型歪み（端で 8%）と自動機能（HDR・AF・オートフレーミング）のため不採用方向
 - 400-CAM106 の注意: 1080p は設定順序次第で非圧縮 YUY2（2.5fps）に落ちる。`CameraSource` は fps→解像度→FOURCC の順で設定済み。4K は MJPG 15fps。付属アプリ（UMviewer）を閉じないと DirectShow で開けない
 - 未対応: 2点間モードへの IC-GN 適用、レンズ歪み補正（`cv2.undistort`。Insta360 を使う場合のみ必要）

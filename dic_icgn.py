@@ -18,6 +18,7 @@ cv2.remap は座標を 1/32 px に量子化するため IC-GN の収束に使え
 """
 from __future__ import annotations
 import os
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Tuple
 import numpy as np
@@ -26,8 +27,13 @@ import cv2
 from scipy import ndimage as _ndi
 
 try:
-    import cupy as _cp
-    from cupyx.scipy import ndimage as _cpx_ndi
+    # pip の cupy-cuda12x[ctk] 構成では CUDA Toolkit のインストーラが置く CUDA_PATH が無いため
+    # 「CUDA path could not be detected」の UserWarning が出るが、ライブラリは pip の
+    # nvidia-*-cu12 wheel から見つかり動作に影響しない（check_gpu.py で確認済み）。この警告だけ抑制
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="CUDA path could not be detected", category=UserWarning)
+        import cupy as _cp
+        from cupyx.scipy import ndimage as _cpx_ndi
 except Exception:      # ImportError / CUDA 不在
     _cp = None
     _cpx_ndi = None

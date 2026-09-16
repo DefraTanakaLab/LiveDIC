@@ -5,6 +5,7 @@ matplotlib
 PyQt6
 joblib
 pyinstaller
+pygrabber            # Windows: DirectShow のカメラ名列挙（開かずに検索でき、外付けカメラの自動選択に使う）。無くても動く
 # GPU（任意）: NVIDIA GPU + CUDA 12 環境でリアルタイムマップを GPU 化する場合のみ
 #   pip install "cupy-cuda12x[ctk]"     # [ctk] で CUDA ランタイム・ヘッダも pip から入る（CuPy 14 系は必須）
 #   RTX 50 系 (Blackwell, sm_120) は CUDA 12.8 以降に対応した CuPy が必要（14.2 で動作確認済み）

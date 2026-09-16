@@ -7,7 +7,7 @@ LiveDIC  —  インターバル撮影画像のリアルタイムDIC解析ツー
   マップモード : フルフィールドひずみマップをバックグラウンド計算・スライダーで閲覧
 """
 from __future__ import annotations
-import sys, os, csv, re, time, threading, pathlib, platform, multiprocessing
+import sys, os, csv, re, time, threading, pathlib, platform, multiprocessing, traceback
 import cv2
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
@@ -46,6 +46,7 @@ from PyQt6.QtGui import (QPixmap, QImage, QPainter, QPen, QColor,
 
 import dic_core
 import rt_panel
+import rt_source
 
 # ===========================================================================
 # 定数
@@ -2458,12 +2459,41 @@ class MainWindow(QMainWindow):
 # エントリーポイント
 # ===========================================================================
 
+def _install_excepthook(get_window):
+    """
+    PyQt6 は Qt スロット内の未捕捉例外で qFatal → abort() し、closeEvent も atexit も通らずに
+    プロセスが消える。そのままだとカメラ取得スレッドが cv2.VideoCapture を release できず、
+    400-CAM106 が DirectShow から開けなくなる（USB 抜き差しが必要）。例外はログに出して
+    アプリは生かし、終了時のクリーンアップ（rt_source の atexit）が必ず走るようにする。
+    """
+    def hook(etype, value, tb):
+        msg = "".join(traceback.format_exception(etype, value, tb))
+        sys.stderr.write(msg)
+        win = get_window()
+        try:
+            if win is not None:
+                win._append_log(f"[ERROR] 未捕捉の例外: {etype.__name__}: {value}")
+        except Exception:
+            pass
+    sys.excepthook = hook
+
+
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    holder = {"win": None}
+    _install_excepthook(lambda: holder["win"])
     win = MainWindow()
+    holder["win"] = win
     win.show()
-    sys.exit(app.exec())
+    # どの経路で抜けてもカメラを解放する。DirectShow の停止はメインスレッドのメッセージポンプが
+    # 必要なので、イベントループ内（aboutToQuit）と復帰後の両方で processEvents を回しつつ止める
+    app.aboutToQuit.connect(lambda: rt_source.stop_all_sources(pump=app.processEvents))
+    try:
+        rc = app.exec()
+    finally:
+        rt_source.stop_all_sources(pump=app.processEvents)
+    sys.exit(rc)
 
 
 if __name__ == "__main__":

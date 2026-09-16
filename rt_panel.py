@@ -174,7 +174,7 @@ class RTMapPanel(QWidget):
         self._review_mode = False
         self._lut = _lut(CMAPS[0])
         self._comp = "exx"
-        self._cam_list: List[int] = []
+        self._cam_list: List[Tuple[int, str]] = []
         self._scanned = False        # タブを初めて表示したときに一度だけカメラ検索する
 
         lay = QVBoxLayout(self)
@@ -410,12 +410,15 @@ class RTMapPanel(QWidget):
     # ------------------------------------------------------------------
     # ソース
     # ------------------------------------------------------------------
-    def _populate_sources(self, cams: List[int]):
+    def _populate_sources(self, cams: List[Tuple[int, str]]):
         cur = self.cb_source.currentText()
         self.cb_source.blockSignals(True)
         self.cb_source.clear()
-        for i in cams:
-            self.cb_source.addItem(f"カメラ {i}", ("cam", i))
+        for i, name in cams:
+            label = f"カメラ {i}: {name}" if name else f"カメラ {i}"
+            if name and rt_source.is_builtin_camera_name(name):
+                label += "（内蔵）"
+            self.cb_source.addItem(label, ("cam", i))
         if not cams:
             self.cb_source.addItem("（カメラなし）", None)
         idx = self.cb_source.findText(cur)
@@ -434,9 +437,15 @@ class RTMapPanel(QWidget):
         self._populate_sources(cams)
         self.btn_scan.setEnabled(True)
         self.btn_scan.setText("カメラ検索")
-        self.host._append_log(f"カメラ検索: {cams if cams else 'なし'}")
+        self.host._append_log("カメラ検索: " + (", ".join(f"{i}: {n or '?'}" for i, n in cams) if cams else "なし"))
         if cams and self._worker is None:
-            self.cb_source.setCurrentIndex(0)      # 見つかった最初のカメラ
+            # 外付け（内蔵らしくない名前）を優先。ノート PC では内蔵が 0 番に来るため
+            pick = rt_source.pick_default_camera(cams)
+            for k in range(self.cb_source.count()):
+                data = self.cb_source.itemData(k)
+                if data and data[1] == pick:
+                    self.cb_source.setCurrentIndex(k)
+                    break
             self._start_source()
 
     def showEvent(self, ev):
@@ -762,7 +771,8 @@ class _ScanThread(QThread):
     done = pyqtSignal(list)
 
     def run(self):
+        # 列挙も open テストもカメラがハングしていると固まるので、必ずこのスレッドで行う
         try:
-            self.done.emit(rt_source.list_cameras())
+            self.done.emit(rt_source.list_cameras_named())
         except Exception:
             self.done.emit([])

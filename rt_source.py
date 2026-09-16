@@ -9,15 +9,80 @@ rt_source.py  —  LiveDIC リアルタイムマップモード用フレーム�
 消費側（DIC）が追いつかなければ古いフレームは自然に捨てられる（間引き）。
 """
 from __future__ import annotations
+import os
 import sys
+import re
 import time
+import atexit
 import threading
+import weakref
 from typing import Optional, Tuple, List
 import numpy as np
 import cv2
 from scipy.special import erf
 
+try:
+    # DirectShow のデバイス名を OpenCV の CAP_DSHOW と同じ順で列挙する（Windows のみ、任意依存）
+    if os.environ.get("LIVEDIC_NO_DSHOW_NAMES"):
+        raise ImportError("disabled by LIVEDIC_NO_DSHOW_NAMES")
+    import comtypes as _comtypes
+    from pygrabber.dshow_graph import FilterGraph as _DShowFilterGraph
+except Exception:       # 未インストール / 非 Windows / comtypes 不在
+    _comtypes = None
+    _DShowFilterGraph = None
+
 Frame = Tuple[int, float, np.ndarray]   # (frame_id, timestamp, gray uint8)
+
+# 取得スレッドが動いたままプロセスが終わると、cv2.VideoCapture が release されず
+# DirectShow 側でデバイスが掴まれたままになり、次に開けなくなる（400-CAM106 で実測。
+# USB の抜き差しで復帰）。生きているソースを弱参照で記録し、インタプリタ終了時に必ず止める。
+_LIVE_SOURCES: "weakref.WeakSet[FrameSource]" = weakref.WeakSet()
+
+
+def stop_all_sources(pump=None, timeout: float = 10.0):
+    """
+    生きている全ソースを止める。GUI からは pump=QApplication.processEvents を渡すこと。
+
+    DirectShow の停止（cv2.VideoCapture.release）は一部が COM のメインスレッド（STA）経由で
+    処理されるため、Qt のイベントループが終わった後（app.exec() 復帰後・atexit）に止めると
+    release() 自体は返ってくるのにデバイスへ停止が届かず、以後そのカメラが開けなくなる
+    （400-CAM106 で複数回再現、USB 抜き差しで復帰）。停止待ちの間に pump でメッセージを
+    回し続ければ届く。
+    """
+    srcs = list(_LIVE_SOURCES)
+    if not srcs:
+        return
+    for src in srcs:
+        src._stop.set()
+    deadline = time.perf_counter() + timeout
+    while time.perf_counter() < deadline and any(s.running() for s in srcs):
+        if pump is not None:
+            try:
+                pump()
+            except Exception:
+                pass
+        time.sleep(0.01)
+    for src in srcs:
+        try:
+            src.stop()
+        except Exception:
+            pass
+    if pump is not None and any(isinstance(s, CameraSource) for s in srcs):
+        # 解放後もしばらくメッセージを回す（停止完了の通知がデバイス／ドライバまで届くのを待つ）
+        t_end = time.perf_counter() + 0.6
+        while time.perf_counter() < t_end:
+            try:
+                pump()
+            except Exception:
+                pass
+            time.sleep(0.01)
+
+
+def _stop_all_sources():
+    stop_all_sources(pump=None)
+
+
+atexit.register(_stop_all_sources)
 
 
 class FrameSource:
@@ -40,12 +105,22 @@ class FrameSource:
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+        _LIVE_SOURCES.add(self)
 
     def stop(self):
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=3.0)
+        th = self._thread
+        if th is not None:
+            th.join(timeout=3.0)
+            if th.is_alive():
+                # ここで諦めると cv2.VideoCapture が release されず、DirectShow がデバイスを
+                # 掴んだままになる（次回 open 不能、USB 抜き差しが必要）。もう少し待つ
+                sys.stderr.write(f"[rt_source] {type(self).__name__}: 取得スレッドが 3 s で止まりません。待機を延長\n")
+                th.join(timeout=7.0)
+                if th.is_alive():
+                    sys.stderr.write(f"[rt_source] {type(self).__name__}: 取得スレッドが停止せず。カメラが解放されない可能性\n")
             self._thread = None
+        _LIVE_SOURCES.discard(self)
 
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -91,6 +166,75 @@ def list_cameras(max_index: int = 6) -> List[int]:
     return found
 
 
+def camera_names() -> List[str]:
+    """
+    DirectShow のデバイス名（OpenCV CAP_DSHOW のインデックス順）。取れない環境では []。
+
+    呼び出しスレッドで COM を初期化してから列挙する（QThread など COM 未初期化のスレッドでは
+    失敗して [] になるため）。**メインスレッドから呼ばないこと**: カメラがハングしていると
+    DirectShow の列挙自体が数十秒〜無期限に固まり、GUI ごと止まる（400-CAM106 で実測）。
+    """
+    if _DShowFilterGraph is None or not sys.platform.startswith("win"):
+        return []
+    inited = False
+    try:
+        try:
+            _comtypes.CoInitialize()
+            inited = True
+        except Exception:      # 既に別モードで初期化済み等。そのまま試す
+            pass
+        return [str(n) for n in _DShowFilterGraph().get_input_devices()]
+    except Exception:
+        return []
+    finally:
+        if inited:
+            try:
+                _comtypes.CoUninitialize()
+            except Exception:
+                pass
+
+
+def list_cameras_named(max_index: int = 6, names: Optional[List[str]] = None) -> List[Tuple[int, str]]:
+    """
+    カメラの (番号, 名前) 一覧。GUI からは別スレッドで呼ぶ（列挙も open テストも固まり得る）。
+
+    名前が取れたときは **デバイスを開かずに** DirectShow の列挙だけで一覧を作る。
+    400-CAM106 はストリームの開始／停止を繰り返すと確率的（実測 2〜3 割/回）にファームウェアが
+    ハングし、USB 抜き差しでしか復帰しない（pnputil /restart-device では消えたまま戻らない）ため、
+    「検索で開いて 1 フレーム読んで閉じる → 本番でもう一度開く」の 2 回開きを避ける。
+    名前が取れない環境（pygrabber 無し）だけ従来の open テストにフォールバック。
+    """
+    if names is None:
+        names = camera_names()
+    if names:
+        return [(i, n) for i, n in enumerate(names)]
+    return [(i, "") for i in list_cameras(max_index)]
+
+
+# ノート PC 内蔵カメラらしい名前。これに当たらないカメラ（外付け）を既定で選ぶ
+_BUILTIN_CAMERA_RE = re.compile(
+    r"integrated|built-?in|internal|ir camera|infrared|facetime|surface|"
+    r"^f?hd webcam$|^usb ?2\.0 (hd )?uvc webcam$",      # 各社ノート PC の典型名
+    re.IGNORECASE)
+
+
+def is_builtin_camera_name(name: str) -> bool:
+    return bool(name) and _BUILTIN_CAMERA_RE.search(name.strip()) is not None
+
+
+def pick_default_camera(cams: List[Tuple[int, str]]) -> Optional[int]:
+    """
+    既定で選ぶカメラ番号。外付け（内蔵らしくない名前）を優先し、なければ最後に見つかった番号。
+    ノート PC では内蔵カメラが 0 番で最初に列挙されるため、単に 0 を選ぶと実験用カメラが選ばれない。
+    """
+    if not cams:
+        return None
+    external = [i for i, n in cams if n and not is_builtin_camera_name(n)]
+    if external:
+        return external[0]
+    return cams[-1][0]
+
+
 class CameraSource(FrameSource):
     def __init__(self, index: int = 0, width: int = 1920, height: int = 1080,
                  fps: int = 30, fourcc: str = "MJPG"):
@@ -132,7 +276,11 @@ class CameraSource(FrameSource):
                 self._publish(fid, gray)
                 fid += 1
         finally:
+            t0 = time.perf_counter()
             cap.release()
+            dt = time.perf_counter() - t0
+            if dt > 1.0:
+                sys.stderr.write(f"[rt_source] カメラ {self.index} の release に {dt:.1f} s\n")
 
 
 # ---------------------------------------------------------------------------
