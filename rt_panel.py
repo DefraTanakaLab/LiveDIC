@@ -293,10 +293,11 @@ class RTMapPanel(QWidget):
         self.cb_scale.setCurrentIndex(1)
         self.cb_scale.currentIndexChanged.connect(self._on_scale_changed)
         row3.addWidget(self.cb_scale)
-        self.sp_vmin = QDoubleSpinBox(); self.sp_vmin.setRange(-10, 10); self.sp_vmin.setDecimals(4)
-        self.sp_vmin.setSingleStep(0.01); self.sp_vmin.setFixedWidth(70)
-        self.sp_vmax = QDoubleSpinBox(); self.sp_vmax.setRange(-10, 10); self.sp_vmax.setDecimals(4)
-        self.sp_vmax.setSingleStep(0.01); self.sp_vmax.setFixedWidth(70)
+        # スケールの入力は % 単位・小数 2 桁（内部では割合に変換して使う）
+        self.sp_vmin = QDoubleSpinBox(); self.sp_vmin.setRange(-1000, 1000); self.sp_vmin.setDecimals(2)
+        self.sp_vmin.setSingleStep(0.1); self.sp_vmin.setSuffix(" %"); self.sp_vmin.setFixedWidth(84)
+        self.sp_vmax = QDoubleSpinBox(); self.sp_vmax.setRange(-1000, 1000); self.sp_vmax.setDecimals(2)
+        self.sp_vmax.setSingleStep(0.1); self.sp_vmax.setSuffix(" %"); self.sp_vmax.setFixedWidth(84)
         self.sp_vmin.valueChanged.connect(self._request_redraw)
         self.sp_vmax.valueChanged.connect(self._request_redraw)
         row3.addWidget(self.sp_vmin); row3.addWidget(QLabel("–")); row3.addWidget(self.sp_vmax)
@@ -567,9 +568,11 @@ class RTMapPanel(QWidget):
         custom = vmin is None
         self.sp_vmin.setEnabled(custom)
         self.sp_vmax.setEnabled(custom)
+        unit = " %/s" if self._is_rate() else " %"
+        self.sp_vmin.setSuffix(unit); self.sp_vmax.setSuffix(unit)
         if not custom:
             self.sp_vmin.blockSignals(True); self.sp_vmax.blockSignals(True)
-            self.sp_vmin.setValue(vmin); self.sp_vmax.setValue(vmax)
+            self.sp_vmin.setValue(vmin * 100); self.sp_vmax.setValue(vmax * 100)
             self.sp_vmin.blockSignals(False); self.sp_vmax.blockSignals(False)
         self._request_redraw()
 
@@ -578,7 +581,8 @@ class RTMapPanel(QWidget):
         self._request_redraw()
 
     def _scale(self) -> Tuple[float, float]:
-        return self.sp_vmin.value(), self.sp_vmax.value()
+        """表示スケール（割合）。スピンボックスは % 表示なので /100。"""
+        return self.sp_vmin.value() / 100.0, self.sp_vmax.value() / 100.0
 
     def _update_colorbar(self):
         vmin, vmax = self._scale()
@@ -586,8 +590,8 @@ class RTMapPanel(QWidget):
         rgb = np.repeat(self._lut[grad][None, :, :], 14, axis=0)
         self.lbl_cbar.setPixmap(rgb_to_qpixmap(rgb))
         unit = "%/s" if self._is_rate() else "%"
-        self.lbl_cb_min.setText(f"{vmin * 100:.2g} {unit}")
-        self.lbl_cb_max.setText(f"{vmax * 100:.2g} {unit}")
+        self.lbl_cb_min.setText(f"{vmin * 100:.2f} {unit}")
+        self.lbl_cb_max.setText(f"{vmax * 100:.2f} {unit}")
 
     def _request_redraw(self):
         self._latest_drawn_fid = -1
