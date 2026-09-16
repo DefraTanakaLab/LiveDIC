@@ -27,10 +27,12 @@ import dic_icgn
 # バックエンド判定（CuPy が import でき、CUDA デバイスが 1 台以上あれば GPU）
 # ---------------------------------------------------------------------------
 _cp = None
+_cupyx = None
 _GPU_NAME = ""
 _GPU_ERROR = ""
 try:
     import cupy as _cupy
+    import cupyx as _cupyx_mod
     if _cupy.cuda.runtime.getDeviceCount() > 0:
         _props = _cupy.cuda.runtime.getDeviceProperties(0)
         _name = _props.get("name", b"")
@@ -38,9 +40,28 @@ try:
         # 実際にカーネルが動くか確認（sm 非対応などで import は通るが実行不能な場合を検出）
         _cupy.arange(4).sum()
         _cp = _cupy
+        _cupyx = _cupyx_mod
 except Exception as _e:  # ImportError, CUDARuntimeError など
     _cp = None
+    _cupyx = None
     _GPU_ERROR = str(_e)
+
+
+if _cp is not None:
+    @_cp.fuse()
+    def _f_subpix(cm, c0, cpl, rm, rpl, border, x0x, bj, y0x, bi, half, cxx, cyy):
+        """放物線サブピクセル＋変位計算を 1 カーネルに融合（GPU の処理時間は起動回数で決まる）。"""
+        d = cm - 2 * c0 + cpl
+        du = _cp.where(_cp.abs(d) > 1e-12, 0.5 * (cm - cpl) / _cp.where(_cp.abs(d) > 1e-12, d, 1.0), 0.0)
+        d2 = rm - 2 * c0 + rpl
+        dv = _cp.where(_cp.abs(d2) > 1e-12, 0.5 * (rm - rpl) / _cp.where(_cp.abs(d2) > 1e-12, d2, 1.0), 0.0)
+        du = _cp.where(border, 0.0, _cp.minimum(_cp.maximum(du, -1.0), 1.0))
+        dv = _cp.where(border, 0.0, _cp.minimum(_cp.maximum(dv, -1.0), 1.0))
+        u = (x0x + bj + half - cxx).astype(_cp.float32) + du
+        v = (y0x + bi + half - cyy).astype(_cp.float32) + dv
+        return u, v
+else:
+    _f_subpix = None
 
 
 def gpu_available() -> bool:
@@ -142,7 +163,7 @@ class RTTracker:
         self.ever_good = np.zeros(self.N, bool)   # 一度でも追従できた点（描画用の変位埋めに使う）
         self.velocity_gain = 0.9     # 外挿の重み（1 で完全外挿。過大予測を避けて少し抑える）
         # 位相相関フォールバック用: 前フレームの縮小 ROI（探索範囲を超える大ジャンプの復帰に使う）
-        self._prev_small: Optional[np.ndarray] = None
+        self._prev_frame: Optional[np.ndarray] = None   # 前フレーム（uint8 の参照。縮小は必要になったときだけ）
         self._small_scale = 4
         self.u_total_last = np.zeros(self.N, np.float64)   # 直近の有効な総変位
         self.v_total_last = np.zeros(self.N, np.float64)
@@ -166,6 +187,7 @@ class RTTracker:
         self._pool = ThreadPoolExecutor(self.n_threads) if self.n_threads > 1 else None
         self._band_cache: Dict = {}
         self._ref_fft_cache: Dict = {}   # GPU 経路: 参照サブセットの FFT（FFT サイズごと。再参照で破棄）
+        self._pinned = None              # GPU 経路: 画像転送用のピン留めホストバッファ
         self.frame_count = 0
         self.n_reref = 0
         self.frames_since_reref = 0
@@ -182,7 +204,16 @@ class RTTracker:
             img_u8 = cv2.cvtColor(img_u8, cv2.COLOR_BGR2GRAY)
         p = self.pad
         padded = cv2.copyMakeBorder(img_u8, p, p, p, p, cv2.BORDER_CONSTANT, value=0)
-        return self.xp.asarray(padded, dtype=self.xp.float32) / self.xp.float32(255.0)
+        if self.use_gpu:
+            # uint8 のまま転送して GPU で float 化する（CPU で float32 にしてから上げると転送量が 4 倍で 3 ms）。
+            # 転送元はピン留めメモリを使い回す（ページャブルだと DMA 前にコピーが入る）
+            if self._pinned is None or self._pinned.shape != padded.shape:
+                self._pinned = _cupyx.zeros_pinned(padded.shape, dtype=np.uint8)
+            np.copyto(self._pinned, padded)
+            dev = _cp.empty(padded.shape, dtype=_cp.uint8)
+            dev.set(self._pinned)
+            return dev.astype(_cp.float32) / _cp.float32(255.0)
+        return padded.astype(np.float32) / np.float32(255.0)
 
     def _set_reference(self, img_u8: np.ndarray):
         xp = self.xp
@@ -332,6 +363,13 @@ class RTTracker:
         border = (bi == 0) | (bi == K - 1) | (bj == 0) | (bj == K - 1)
         biC = xp.clip(bi, 1, max(K - 2, 1))
         bjC = xp.clip(bj, 1, max(K - 2, 1))
+        if self.use_gpu and K >= 3:
+            cm = zncc[arM, biC, bjC - 1]; c0 = zncc[arM, biC, bjC]; cpl = zncc[arM, biC, bjC + 1]
+            rm = zncc[arM, biC - 1, bjC]; rpl = zncc[arM, biC + 1, bjC]
+            u, v = _f_subpix(cm, c0, cpl, rm, rpl, border, x0x, bj, y0x, bi, xp.int64(half),
+                             xp.asarray(cx), xp.asarray(cy))
+            packed = _to_numpy(xp.stack([u, v, peak.astype(xp.float32), border.astype(xp.float32)]))
+            return packed[0], packed[1], packed[2], packed[3] > 0.5
         if K >= 3:
             cm = zncc[arM, biC, bjC - 1]; c0 = zncc[arM, biC, bjC]; cpl = zncc[arM, biC, bjC + 1]
             d = cm - 2 * c0 + cpl
@@ -347,6 +385,10 @@ class RTTracker:
         # 変位 = 候補中心（パディング座標） - 現在の中心（パディング座標）
         u = (x0x + bj + half).astype(xp.float32) - xp.asarray(cx, dtype=xp.float32) + du
         v = (y0x + bi + half).astype(xp.float32) - xp.asarray(cy, dtype=xp.float32) + dv
+        if self.use_gpu:
+            # 4 配列を別々に取り出すと同期が 4 回入る。1 本にまとめて 1 回で転送する
+            packed = _to_numpy(xp.stack([u, v, peak.astype(xp.float32), border.astype(xp.float32)]))
+            return packed[0], packed[1], packed[2], packed[3] > 0.5
         return _to_numpy(u), _to_numpy(v), _to_numpy(peak), _to_numpy(border)
 
     # ------------------------------------------------------------------
@@ -408,7 +450,7 @@ class RTTracker:
             n_probe_used = int(n_probe)
             hit = probe[(zs >= self.retry_zncc) & ~bs]
             rest = idx[~np.isin(idx, probe)]
-            if hit.size < 4 and self._prev_small is not None:
+            if hit.size < 4 and self._prev_frame is not None:
                 # 最終段の半径でも見つからない → 位相相関で全体のズレを測り、直近変位＋ズレを中心に再探索
                 gs = self._global_shift(def_img_u8)
                 if gs is not None:
@@ -456,7 +498,11 @@ class RTTracker:
             mx_g = self.cx[good] + u[good]; my_g = self.cy[good] + v[good]
             bbox = (int(mx_g.min()) - m, int(my_g.min()) - m, int(mx_g.max()) + m + 1, int(my_g.max()) + m + 1)
             t_i = time.perf_counter()
-            self._icgn.set_deformed(def_img_u8, bbox)
+            if self.use_gpu:
+                # 既に GPU に上げた float 画像（パディング済み）から切り出す（uint8 を再度上げない）
+                self._icgn.set_deformed_from_float(img, bbox, pad=self.pad)
+            else:
+                self._icgn.set_deformed(def_img_u8, bbox)
             p0 = self.p_aff.copy()
             p0[:, 0] = np.where(good, u, 0.0); p0[:, 3] = np.where(good, v, 0.0)
             p_new, z2, conv, n_it = self._icgn.refine(p0, mask=good)
@@ -514,7 +560,7 @@ class RTTracker:
             self._rereference(def_img_u8)
             rerefed = True
 
-        self._prev_small = self._make_small(def_img_u8)
+        self._prev_frame = def_img_u8    # 縮小は位相相関が要るときだけ行う（毎フレームだと 0.8 ms）
 
         U2 = U.reshape(self.ny, self.nx)
         V2 = V.reshape(self.ny, self.nx)
@@ -565,7 +611,7 @@ class RTTracker:
     def _global_shift(self, img_u8: np.ndarray) -> Optional[Tuple[float, float]]:
         """前フレーム（縮小）との位相相関で全体シフト [px] を返す。応答が弱ければ None。"""
         cur = self._make_small(img_u8)
-        prev = self._prev_small
+        prev = self._make_small(self._prev_frame) if self._prev_frame is not None else None
         if prev is None or prev.shape != cur.shape:
             return None
         win = cv2.createHanningWindow((cur.shape[1], cur.shape[0]), cv2.CV_32F)

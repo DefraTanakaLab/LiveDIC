@@ -47,6 +47,35 @@ def _to_numpy(a):
     return _cp.asnumpy(a) if _is_cupy(a) else np.asarray(a)
 
 
+# ---------------------------------------------------------------------------
+# GPU 用の融合カーネル（cupy.fuse）
+# 1 フレームの GPU 処理時間は点数にほぼ依存せず（1,547 点でも 20 点でも約 10 ms）、
+# Python から小さなカーネルを数百回起動するオーバーヘッドが支配的。要素ごとの演算の連鎖を
+# 1 カーネルにまとめて起動回数を減らす。CPU 経路（numpy）では同じ式を普通に評価する。
+# ---------------------------------------------------------------------------
+if _cp is not None:
+    @_cp.fuse()
+    def _f_warp_xy(cx, cy, A, B, C, D, E, F, xl, yl):
+        return cx + A * xl + B * yl + C, cy + D * xl + E * yl + F
+
+    @_cp.fuse()
+    def _f_residual(f_zm, g_zm, ratio):
+        return f_zm - ratio * g_zm
+
+    @_cp.fuse()
+    def _f_dnorm(d0, d1, d2, d3, d4, d5, half):
+        return _cp.sqrt(d0 * d0 + d3 * d3 + (d1 * half) ** 2 + (d2 * half) ** 2 + (d4 * half) ** 2 + (d5 * half) ** 2)
+
+    @_cp.fuse()
+    def _f_sanitize(X, Y, xmax, ymax):
+        # 非有限は 0 に、範囲外は画像内にクランプ（map_coordinates は inf/巨大値で illegal address になる）
+        Xs = _cp.where(_cp.isfinite(X), X, 0.0)
+        Ys = _cp.where(_cp.isfinite(Y), Y, 0.0)
+        return _cp.minimum(_cp.maximum(Xs, 0.0), xmax), _cp.minimum(_cp.maximum(Ys, 0.0), ymax)
+else:
+    _f_warp_xy = _f_residual = _f_dnorm = _f_sanitize = None
+
+
 class ICGNRefiner:
     """
     参照画像上の N 個のサブセット中心 (cx, cy) について IC-GN を一括反復する。
@@ -159,6 +188,24 @@ class ICGNRefiner:
         else:
             self._coef = _cpx_ndi.spline_filter(self.xp.asarray(g), order=3, output=self.xp.float32, mode="mirror")
 
+    def set_deformed_from_float(self, img_f32, bbox: Optional[Tuple[int, int, int, int]] = None, pad: int = 0):
+        """
+        既に xp 上にある float32 [0,1] 画像（周囲 pad 画素のパディング込み）から係数化する。
+        GPU 経路で RTTracker が上げた画像を共用し、uint8 の再転送と CPU での float 化を省く。
+        値は set_deformed(uint8) の uint8/255 と同一。
+        """
+        if bbox is not None:
+            H, W = self.img_shape
+            self.bx0 = int(max(0, bbox[0])); self.by0 = int(max(0, bbox[1]))
+            self.bx1 = int(min(W, bbox[2])); self.by1 = int(min(H, bbox[3]))
+        g = img_f32[pad + self.by0:pad + self.by1, pad + self.bx0:pad + self.bx1]
+        if self.xp is np:
+            self._coef = _ndi.spline_filter(np.ascontiguousarray(g, dtype=np.float32), order=3,
+                                            output=np.float32, mode="mirror")
+        else:
+            self._coef = _cpx_ndi.spline_filter(self.xp.ascontiguousarray(g), order=3,
+                                                output=self.xp.float32, mode="mirror")
+
     # ------------------------------------------------------------------
     def _sample(self, X, Y, threaded: bool = True):
         """(M,S²) の実数座標で変形画像を補間。戻り値 (M,S²) float32（xp）。"""
@@ -187,8 +234,7 @@ class ICGNRefiner:
         # 事前に有限化して画像内にクランプする（nearest と同じ意味なので結果は変わらない）
         xp = self.xp
         H, W = self._coef.shape
-        X = xp.clip(xp.nan_to_num(X, nan=0.0, posinf=W - 1.0, neginf=0.0), 0.0, W - 1.0)
-        Y = xp.clip(xp.nan_to_num(Y, nan=0.0, posinf=H - 1.0, neginf=0.0), 0.0, H - 1.0)
+        X, Y = _f_sanitize(X, Y, xp.float32(W - 1.0), xp.float32(H - 1.0))
         coords = xp.stack([Y.ravel(), X.ravel()])
         return _cpx_ndi.map_coordinates(self._coef, coords, order=3, prefilter=False,
                                         mode="nearest", output=xp.float32).reshape(X.shape)
@@ -255,27 +301,37 @@ class ICGNRefiner:
         zncc = xp.full(M, -1.0, dtype=xp.float32)
         xl = self.xl_x[None, :]; yl = self.yl_x[None, :]
 
+        gpu = xp is not np
         for k in range(self.max_iter):
             last = (k == self.max_iter - 1)
             A = Wm[:, 0, 0][:, None]; B = Wm[:, 0, 1][:, None]; C = Wm[:, 0, 2][:, None]
             D = Wm[:, 1, 0][:, None]; E = Wm[:, 1, 1][:, None]; F = Wm[:, 1, 2][:, None]
-            X = cx + A * xl + B * yl + C
-            Y = cy + D * xl + E * yl + F
+            if gpu:
+                X, Y = _f_warp_xy(cx, cy, A, B, C, D, E, F, xl, yl)
+            else:
+                X = cx + A * xl + B * yl + C
+                Y = cy + D * xl + E * yl + F
             g = self._sample(X, Y, threaded=False)
             g_zm = g - g.mean(axis=1, keepdims=True)
             dg = xp.sqrt((g_zm * g_zm).sum(axis=1)) + 1e-12
             zncc = (f_zm * g_zm).sum(axis=1) / (df * dg)
-            e = f_zm - (df / dg)[:, None] * g_zm                      # (M,S²)
+            ratio = (df / dg)[:, None]
+            e = _f_residual(f_zm, g_zm, ratio) if gpu else f_zm - ratio * g_zm      # (M,S²)
             bvec = xp.matmul(e[:, None, :], J)[:, 0, :]              # (M,6)
             dp = -xp.matmul(Hinv, bvec[:, :, None])[:, :, 0]         # (M,6)
-            dnorm = xp.sqrt(dp[:, 0] ** 2 + dp[:, 3] ** 2 +
-                            (dp[:, 1] * half) ** 2 + (dp[:, 2] * half) ** 2 +
-                            (dp[:, 4] * half) ** 2 + (dp[:, 5] * half) ** 2)
+            if gpu:
+                dnorm = _f_dnorm(dp[:, 0], dp[:, 1], dp[:, 2], dp[:, 3], dp[:, 4], dp[:, 5], xp.float32(half))
+            else:
+                dnorm = np.sqrt(dp[:, 0] ** 2 + dp[:, 3] ** 2 +
+                                (dp[:, 1] * half) ** 2 + (dp[:, 2] * half) ** 2 +
+                                (dp[:, 4] * half) ** 2 + (dp[:, 5] * half) ** 2)
             newly = active & (dnorm < self.tol)
             converged |= newly
             n_it += active.astype(xp.int32)
             active = active & ~newly & xp.isfinite(dnorm)
-            if last or not bool(active.any()):
+            # 全点収束の早期終了判定は CPU 経路のみ。GPU では bool(active.any()) が同期になり
+            # CPU が毎反復 GPU の完了を待つ。全反復を流しても収束済み点は xp.where で動かないので結果は同じ
+            if last or (xp is np and not active.any()):
                 break
             # 逆合成更新: W ← W ∘ W(Δp)⁻¹（収束済み・打ち切り点は動かさない）
             dW = self._p_to_W(dp)
@@ -287,8 +343,13 @@ class ICGNRefiner:
         good_val = xp.isfinite(zncc) & xp.all(xp.isfinite(p_fin), axis=1)
         p_fin = xp.where(good_val[:, None], p_fin, xp.asarray(p_init))
         zncc = xp.where(good_val, zncc, -1.0)
-        return (_to_numpy(p_fin), _to_numpy(zncc).astype(np.float32),
-                _to_numpy(ok), _to_numpy(n_it), gidx)
+        if xp is np:
+            return p_fin, zncc.astype(np.float32), ok, n_it, gidx
+        # GPU: 4 配列を 1 本 (M,9) にまとめて 1 回で取り出す（同期 4 回 → 1 回）
+        packed = _to_numpy(xp.concatenate(
+            [p_fin.astype(xp.float32), zncc.astype(xp.float32)[:, None],
+             ok.astype(xp.float32)[:, None], n_it.astype(xp.float32)[:, None]], axis=1))
+        return (packed[:, :6], packed[:, 6], packed[:, 7] > 0.5, packed[:, 8].astype(np.int32), gidx)
 
     def _p_to_W(self, p):
         xp = self.xp
