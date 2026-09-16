@@ -1211,11 +1211,14 @@ class MainWindow(QMainWindow):
         root.setSpacing(6)
         root.setContentsMargins(8, 8, 8, 8)
 
-        # 右側：タブ + フレームテーブルを縦に並べる
-        right_vsplit = QSplitter(Qt.Orientation.Vertical)
-        right_vsplit.addWidget(self._build_tabs())
-        right_vsplit.addWidget(self._build_frame_table())
-        right_vsplit.setSizes([580, 240])
+        # 右側：タブ + フレームテーブルを縦に並べる（フレームテーブルはリアルタイムタブでは隠す）
+        self._right_vsplit = QSplitter(Qt.Orientation.Vertical)
+        self._right_vsplit.addWidget(self._build_tabs())
+        self._frame_table_widget = self._build_frame_table()
+        self._right_vsplit.addWidget(self._frame_table_widget)
+        self._right_vsplit.setSizes([580, 240])
+        self._right_vsplit_sizes = [580, 240]
+        right_vsplit = self._right_vsplit
 
         # 最上位：設定パネル（全高）| 右側ペイン
         main_hsplit = QSplitter(Qt.Orientation.Horizontal)
@@ -1680,6 +1683,14 @@ class MainWindow(QMainWindow):
         if idx in self._search_defaults:
             self.sp_search_x.setValue(self._search_defaults[idx]["x"])
             self.sp_search_y.setValue(self._search_defaults[idx]["y"])
+        # フレームテーブルはフォルダ監視モード（2点間・マップ）専用。リアルタイムタブでは隠して
+        # 画像表示に高さを回す。分割位置は隠す前のものを覚えておき、戻ったときに復元する
+        if idx == 2 and self._frame_table_widget.isVisible():
+            self._right_vsplit_sizes = self._right_vsplit.sizes()
+            self._frame_table_widget.setVisible(False)
+        elif idx != 2 and not self._frame_table_widget.isVisible():
+            self._frame_table_widget.setVisible(True)
+            self._right_vsplit.setSizes(self._right_vsplit_sizes)
         if idx == 2:  # リアルタイムマップタブ：操作はタブ内で完結。左パネルのモード別ボタンは全て隠す
             self._start_stop_widget.setVisible(False)
             self.btn_dic_run.setVisible(False)
