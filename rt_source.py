@@ -13,10 +13,11 @@ import os
 import sys
 import re
 import time
+import queue
 import atexit
 import threading
 import weakref
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 import numpy as np
 import cv2
 from scipy.special import erf
@@ -242,6 +243,59 @@ class CameraSource(FrameSource):
         self.index = index
         self.req_w, self.req_h, self.req_fps, self.fourcc = width, height, fps, fourcc
         self.actual: Tuple[int, int, float] = (0, 0, 0.0)
+        # フォーカス操作は取得スレッドで行う（cv2.VideoCapture はスレッド安全でない）。
+        # GUI からはコマンドを積むだけで、結果は focus_state に書き戻される
+        self._cmds: "queue.Queue" = queue.Queue()
+        self.focus_state: Dict = {"locked": None, "value": None, "supported": None, "msg": ""}
+        self._focus_seq = 0          # 結果が更新されたかを GUI が知るための通し番号
+
+    # ---- フォーカス（呼び出しは GUI スレッドから。実際の操作は取得スレッド）----
+    def lock_focus(self):
+        """今のピントで固定する（オートフォーカスを切り、現在値を書き戻す）。"""
+        self._cmds.put("lock")
+
+    def unlock_focus(self):
+        """オートフォーカスに戻す。"""
+        self._cmds.put("unlock")
+
+    def focus_seq(self) -> int:
+        return self._focus_seq
+
+    def _apply_focus_cmds(self, cap):
+        while True:
+            try:
+                cmd = self._cmds.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                if cmd == "lock":
+                    cur = cap.get(cv2.CAP_PROP_FOCUS)
+                    ok_af = bool(cap.set(cv2.CAP_PROP_AUTOFOCUS, 0))
+                    # 現在値をそのまま書き戻して固定する。0 が正しいピント位置のこともあるので
+                    # 値では判断せず、常に試して set の戻り値で可否を見る
+                    ok_f = bool(cap.set(cv2.CAP_PROP_FOCUS, cur))
+                    got = cap.get(cv2.CAP_PROP_FOCUS)
+                    af = cap.get(cv2.CAP_PROP_AUTOFOCUS)
+                    supported = ok_af or ok_f
+                    self.focus_state = {
+                        "locked": True if supported else False, "value": got,
+                        "supported": supported,
+                        "msg": (f"フォーカス固定（値 {got:.0f}）" if supported
+                                else "このカメラはフォーカス固定に対応していません"),
+                    }
+                    if supported and not ok_af:
+                        self.focus_state["msg"] += "（AF 切り替えは効きませんでした）"
+                    _ = af
+                elif cmd == "unlock":
+                    ok = bool(cap.set(cv2.CAP_PROP_AUTOFOCUS, 1))
+                    self.focus_state = {"locked": False, "value": cap.get(cv2.CAP_PROP_FOCUS),
+                                        "supported": ok,
+                                        "msg": "オートフォーカスに戻しました" if ok
+                                               else "オートフォーカスに戻せませんでした"}
+            except Exception as e:
+                self.focus_state = {"locked": None, "value": None, "supported": False,
+                                    "msg": f"フォーカス操作に失敗: {e}"}
+            self._focus_seq += 1
 
     def _loop(self):
         cap = cv2.VideoCapture(self.index, _default_backend())
@@ -262,6 +316,7 @@ class CameraSource(FrameSource):
             fid = 0
             fail = 0
             while not self._stop.is_set():
+                self._apply_focus_cmds(cap)      # フレーム取得の合間に適用する
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     fail += 1

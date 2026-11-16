@@ -429,6 +429,7 @@ class RTMapPanel(QWidget):
         self._preview_fid = -1
         self._ref_gray: Optional[np.ndarray] = None
         self._store = None                                # 設定の保存先（main.py が登録する）
+        self._focus_seq = None                            # フォーカス操作の結果待ち
         self._rec: Optional[rt_record.Recorder] = None    # 解析中の一時記録
         self._rec_t = 0.0                                 # 記録中表示の更新間引き用
         self._lut = _lut(CMAPS[0])
@@ -445,6 +446,13 @@ class RTMapPanel(QWidget):
         self.cb_source = QComboBox()
         self.cb_source.setMinimumWidth(150)
         row1.addWidget(self.cb_source)
+        # フォーカス固定は解析中でも押せる（取得スレッドがコマンドを適用するので中断されない）
+        self.btn_focus = QPushButton("🔒 フォーカス固定")
+        self.btn_focus.setCheckable(True)
+        self.btn_focus.setToolTip("今のピントで固定する（オートフォーカスを切る）。"
+                                  "解析中でも押せる。もう一度押すとオートフォーカスに戻る")
+        self.btn_focus.toggled.connect(self._toggle_focus_lock)
+        row1.addWidget(self.btn_focus)
         self.btn_scan = QPushButton("カメラ検索")
         self.btn_scan.clicked.connect(self._scan_cameras)
         row1.addWidget(self.btn_scan)
@@ -837,6 +845,10 @@ class RTMapPanel(QWidget):
             self._source = rt_source.SyntheticSource(w, h, 30.0)
         self._source.start()
         self._preview_fid = -1
+        # 開き直したカメラはオートフォーカスから始まるのでボタンも戻す
+        self.btn_focus.blockSignals(True); self.btn_focus.setChecked(False)
+        self.btn_focus.blockSignals(False)
+        self._focus_seq = None
         self.btn_start.setEnabled(True)
         self.lbl_status.setText("ソースを開いています…")
         self.host._append_log(f"プレビュー開始: {self.cb_source.currentText()} {w}×{h}")
@@ -980,6 +992,31 @@ class RTMapPanel(QWidget):
                                     f"→ {X.size} 点 ({X.shape[0]}×{X.shape[1]})")
         except Exception:
             self.lbl_params.setText("グリッド生成不可")
+
+    def _toggle_focus_lock(self, on: bool):
+        src = self._source
+        if not isinstance(src, rt_source.CameraSource):
+            self.host._append_log("フォーカス固定: カメラが開いていません")
+            self.btn_focus.blockSignals(True); self.btn_focus.setChecked(False)
+            self.btn_focus.blockSignals(False)
+            return
+        self._focus_seq = src.focus_seq()      # 結果が返ったら _tick でログに出す
+        src.lock_focus() if on else src.unlock_focus()
+
+    def _poll_focus(self):
+        """取得スレッドがフォーカス操作を終えていたら結果を知らせる。"""
+        src = self._source
+        if not isinstance(src, rt_source.CameraSource) or self._focus_seq is None:
+            return
+        if src.focus_seq() == self._focus_seq:
+            return
+        self._focus_seq = None
+        st = src.focus_state
+        self.host._append_log(f"フォーカス: {st.get('msg', '')}")
+        if not st.get("supported"):
+            # 効かなかったらボタンの見た目を戻す（固定できていないのに固定表示は紛らわしい）
+            self.btn_focus.blockSignals(True); self.btn_focus.setChecked(False)
+            self.btn_focus.blockSignals(False)
 
     def _browse_dir(self):
         d = QFileDialog.getExistingDirectory(self, "記録の保存先を選択", self.edit_dir.text().strip())
@@ -1287,6 +1324,7 @@ class RTMapPanel(QWidget):
         self._latest = out
 
     def _tick(self):
+        self._poll_focus()
         if self._worker is not None and self._latest is not None:
             out = self._latest
             if out["fid"] == self._latest_drawn_fid:

@@ -87,6 +87,7 @@
 - 全フレームを RAM 保持しない（最新の結果 1 つだけを描画待ちに持つ）
 - 実測（i7-9700, CPU）: 1080p・ROI 1920×380・subset41・step20（約1,800点）で 22〜27 fps
 - カメラは Windows では `CAP_DSHOW` を使う（MSMF はオープンに 12 秒以上かかった）
+- **フォーカス固定（2026-11-17 追加）**: 「🔒 フォーカス固定」ボタンで `CAP_PROP_AUTOFOCUS`=0 ＋ 現在の `CAP_PROP_FOCUS` を書き戻す。`cv2.VideoCapture` はスレッド安全でないので、GUI は `CameraSource` のキューにコマンドを積むだけで、適用はフレーム取得の合間に取得スレッドが行う（**解析中でも押せる**／取得は止まらない）。結果は `focus_state` に書き戻され、GUI が `focus_seq()` の変化を見てログに出す。対応していないカメラではボタンが自動で戻る。Insta360 Link 2C Pro で動作確認（ロック中も 30 fps 継続）
 - ソースは UI 上はカメラのみ。タブを初めて開いたときに自動でカメラ検索し、見つかった最初のカメラでプレビューが始まる。コンボで選ぶ・解像度を変えるでも再オープン。プレビューボタン、合成デモ、動画ファイルソース、デモ動画生成は 2026-09-16 に UI から削除（`rt_source.SyntheticSource` / `VideoFileSource` は `check_gpu.py` と回帰テスト用にコードだけ残す）
 - GPU 経路を変更したら `python check_gpu.py`（と `--4k`）で CPU との数値一致を確認すること
 - **設定の保存（2026-11-17、`settings_store.py`）**: 終了時と解析開始時に `~/.livedic/settings.json` へ書き、起動時に復元する。`MainWindow._init_settings_store()` で登録（左パネルの共通項目＋リアルタイムタブ＋ウィンドウサイズ・分割位置）。ウィジェットでない状態（ROI・成分・カスタムスケール）は `add_custom(getter, setter)` で登録
