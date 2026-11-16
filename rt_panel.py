@@ -593,7 +593,9 @@ class RTMapPanel(QWidget):
         self.btn_stop.setObjectName("btn_stop")
         self.btn_stop.setMinimumHeight(32)
         self.btn_stop.setEnabled(False)
-        self.btn_stop.clicked.connect(self._stop)
+        # clicked は checked(=False) をスロットに渡すので、そのまま繋ぐと _stop(ask=False) になり
+        # 停止時の保存ダイアログが出ないまま保存されてしまう。引数を捨ててから呼ぶ
+        self.btn_stop.clicked.connect(lambda: self._stop())
         row4.addWidget(self.btn_stop)
         # 記録は開始と同時に無条件で始まり、残すかどうかは停止時に決める（rt_record の設計）。
         # 試験中にできるのは「ここ」の印を付けることだけ
