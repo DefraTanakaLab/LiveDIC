@@ -39,6 +39,7 @@ RATE_KEYS = ["rexx", "reyy", "rexy"]
 RATE_LABELS = {"rexx": "ε̇xx", "reyy": "ε̇yy", "rexy": "ε̇xy"}
 SCALE_PRESETS = [("0 – 2 %", 0.0, 0.02), ("0 – 5 %", 0.0, 0.05),
                  ("0 – 10 %", 0.0, 0.10), ("0 – 20 %", 0.0, 0.20),
+                 ("0 – 40 %", 0.0, 0.40),
                  ("カスタム", None, None)]
 RATE_PRESETS = [("0 – 0.1 %/s", 0.0, 0.001), ("0 – 0.5 %/s", 0.0, 0.005),
                 ("0 – 1 %/s", 0.0, 0.01), ("0 – 5 %/s", 0.0, 0.05),
@@ -704,16 +705,18 @@ class RTMapPanel(QWidget):
                 return
 
     def _scale_state(self) -> dict:
-        return {"index": self.cb_scale.currentIndex(),
+        # プリセットを増減しても意味が変わらないよう、位置ではなく名前で覚える
+        return {"name": SCALE_PRESETS[min(self.cb_scale.currentIndex(), len(SCALE_PRESETS) - 1)][0]
+                if not self._is_rate() else RATE_PRESETS[self.cb_scale.currentIndex()][0],
                 "custom": {str(int(k)): list(v) for k, v in self._custom_pct.items()}}
 
     def _restore_scale(self, s: dict):
         for k, v in (s.get("custom") or {}).items():
             self._custom_pct[bool(int(k))] = (float(v[0]), float(v[1]))
-        idx = int(s.get("index", 1))
-        if 0 <= idx < self.cb_scale.count():
-            self.cb_scale.setCurrentIndex(idx)
-            self._apply_scale_index(idx)
+        names = [n for n, _, _ in self._presets()]
+        idx = names.index(s["name"]) if s.get("name") in names else 1
+        self.cb_scale.setCurrentIndex(idx)
+        self._apply_scale_index(idx)
 
     def _restore_roi(self, s: dict):
         # 解像度が違うときの ROI は座標の意味が変わるので捨てる
@@ -878,13 +881,16 @@ class RTMapPanel(QWidget):
         was_rate = self._is_rate()
         self._comp = key
         if was_rate != self._is_rate():
-            # ひずみ [%] と速度 [%/s] でプリセット一覧を入れ替える（選択位置は引き継ぐ）
+            # ひずみ [%] と速度 [%/s] でプリセット一覧を入れ替える（選択位置は引き継ぐ）。
+            # プリセットの数が違うので、カスタムだったかどうかで分けてから丸める
+            was_custom = self.cb_scale.currentIndex() == len(
+                (RATE_PRESETS if was_rate else SCALE_PRESETS)) - 1
             idx = self.cb_scale.currentIndex()
             self.cb_scale.blockSignals(True)
             self.cb_scale.clear()
             for name, _, _ in self._presets():
                 self.cb_scale.addItem(name)
-            idx = min(idx, self.cb_scale.count() - 1)
+            idx = self._custom_index() if was_custom else min(idx, self._custom_index() - 1)
             self.cb_scale.setCurrentIndex(idx)
             self.cb_scale.blockSignals(False)
             self._apply_scale_index(idx)
