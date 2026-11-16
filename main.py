@@ -95,6 +95,10 @@ QCheckBox::indicator:checked,QRadioButton::indicator:checked
                              {background:#4fc3f7;border-color:#4fc3f7;}
 QCheckBox::indicator:disabled,QRadioButton::indicator:disabled
                              {background:#2a2a2a;border-color:#555;}
+/* チェック済みのまま無効化される項目（解析中の GPU・IC-GN 等）が未チェックに見えないよう、
+   :disabled の後に :checked:disabled を置いて「暗いが点いている」色に戻す */
+QCheckBox::indicator:checked:disabled,QRadioButton::indicator:checked:disabled
+                             {background:#2f7490;border-color:#3f8aa8;}
 QCheckBox:disabled,QRadioButton:disabled {color:#666;}
 QScrollBar:vertical          {background:#252525;width:10px;}
 QScrollBar::handle:vertical  {background:#555;border-radius:4px;}
