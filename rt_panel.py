@@ -421,6 +421,7 @@ class RTMapPanel(QWidget):
         self._latest_drawn_fid = -1
         self._preview_fid = -1
         self._ref_gray: Optional[np.ndarray] = None
+        self._store = None                                # 設定の保存先（main.py が登録する）
         self._rec: Optional[rt_record.Recorder] = None    # 解析中の一時記録
         self._rec_t = 0.0                                 # 記録中表示の更新間引き用
         self._lut = _lut(CMAPS[0])
@@ -677,6 +678,48 @@ class RTMapPanel(QWidget):
         self._populate_sources([])
         self._apply_scale_index(self.cb_scale.currentIndex())
 
+    def register_settings(self, store):
+        """次回起動時に復元する項目を登録する（main.py から呼ぶ）。"""
+        self._store = store
+        store.add_many(
+            rt_source=self.cb_source, rt_res=self.cb_res, rt_gpu=self.chk_gpu,
+            rt_r1=self.sp_r1, rt_r2=self.sp_r2, rt_zncc=self.sp_zncc, rt_reref=self.sp_reref,
+            rt_rate_win=self.sp_rate_win, rt_rate_smooth=self.chk_rate_smooth,
+            rt_pos_follow=self.rb_pos_follow,
+            rt_cmap=self.cb_cmap, rt_alpha=self.sl_alpha, rt_rot=self.cb_rot,
+            rt_record=self.chk_record, rt_rec_video=self.chk_rec_video,
+            rt_budget=self.sp_budget, rt_dir=self.edit_dir,
+        )
+        # ウィジェットでない状態。ROI は画像サイズが変わると無効なので解像度ごとに覚える
+        store.add_custom("rt_comp", lambda: self._comp, self._restore_comp)
+        store.add_custom("rt_scale", self._scale_state, self._restore_scale)
+        store.add_custom("rt_roi", lambda: {"res": self.cb_res.currentText(),
+                                            "roi": list(self._roi) if self._roi else None},
+                         self._restore_roi)
+
+    def _restore_comp(self, key: str):
+        for rb in self._comp_bg.buttons():
+            if rb.text() == (STRAIN_LABELS.get(key) or RATE_LABELS.get(key)):
+                rb.setChecked(True)      # toggled → _set_comp が走る
+                return
+
+    def _scale_state(self) -> dict:
+        return {"index": self.cb_scale.currentIndex(),
+                "custom": {str(int(k)): list(v) for k, v in self._custom_pct.items()}}
+
+    def _restore_scale(self, s: dict):
+        for k, v in (s.get("custom") or {}).items():
+            self._custom_pct[bool(int(k))] = (float(v[0]), float(v[1]))
+        idx = int(s.get("index", 1))
+        if 0 <= idx < self.cb_scale.count():
+            self.cb_scale.setCurrentIndex(idx)
+            self._apply_scale_index(idx)
+
+    def _restore_roi(self, s: dict):
+        # 解像度が違うときの ROI は座標の意味が変わるので捨てる
+        if s and s.get("roi") and s.get("res") == self.cb_res.currentText():
+            self._on_roi(*[int(v) for v in s["roi"]])
+
     def bind_host(self):
         """host 側の設定パネル（sp_subset / sp_step）が構築された後に main.py から呼ぶ。"""
         self.host._append_log(f"リアルタイムマップ: バックエンド {dic_rt.backend_name()}")
@@ -719,13 +762,15 @@ class RTMapPanel(QWidget):
         self.btn_scan.setText("カメラ検索")
         self.host._append_log("カメラ検索: " + (", ".join(f"{i}: {n or '?'}" for i, n in cams) if cams else "なし"))
         if cams and self._worker is None:
-            # 外付け（内蔵らしくない名前）を優先。ノート PC では内蔵が 0 番に来るため
-            pick = rt_source.pick_default_camera(cams)
-            for k in range(self.cb_source.count()):
-                data = self.cb_source.itemData(k)
-                if data and data[1] == pick:
-                    self.cb_source.setCurrentIndex(k)
-                    break
+            # 前回使ったカメラがあればそれを優先。無ければ外付け（内蔵らしくない名前）を選ぶ
+            # ノート PC では内蔵が 0 番に来るので「最初のカメラ」だと実験用が選ばれない
+            saved = self._store.get("rt_source") if self._store is not None else None
+            k = self.cb_source.findText(saved) if saved else -1
+            if k < 0:
+                pick = rt_source.pick_default_camera(cams)
+                k = next((i for i in range(self.cb_source.count())
+                          if (self.cb_source.itemData(i) or (None, None))[1] == pick), 0)
+            self.cb_source.setCurrentIndex(k)
             self._start_source()
 
     def showEvent(self, ev):
@@ -988,6 +1033,9 @@ class RTMapPanel(QWidget):
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.host.chk_icgn):
             wdg.setEnabled(False)
         self.host._append_log(f"参照取得: フレーム {fid}")
+        # 試験中にクラッシュしても設定が残るよう、開始時にも保存しておく
+        if hasattr(self.host, "_save_settings"):
+            self.host._save_settings()
 
     def _stop(self, ask: bool = True):
         if self._worker is None:

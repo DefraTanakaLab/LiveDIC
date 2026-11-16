@@ -47,6 +47,7 @@ from PyQt6.QtGui import (QPixmap, QImage, QPainter, QPen, QColor,
 import dic_core
 import rt_panel
 import rt_source
+import settings_store
 
 # ===========================================================================
 # 定数
@@ -1228,9 +1229,54 @@ class MainWindow(QMainWindow):
 
         root.addWidget(main_hsplit)
         self._rt_panel.bind_host()
+        self._init_settings_store()
 
         self.statusBar().showMessage("待機中 — フォルダを選択して ▶ Start を押してください")
         self.statusBar().setStyleSheet("background:#252525;color:#777;")
+
+    # ===================================================================
+    # 設定の保存と復元（~/.livedic/settings.json）
+    # ===================================================================
+
+    def _init_settings_store(self):
+        """全ウィジェットが揃ってから呼ぶ。登録 → 前回値を復元。"""
+        self.settings = settings_store.SettingsStore()
+        self.settings.add_many(
+            # 左パネル（2点間・マップ・リアルタイムで共通のもの）
+            subset=self.sp_subset, step=self.sp_step, icgn=self.chk_icgn,
+            search_x=self.sp_search_x, search_y=self.sp_search_y,
+            zncc=self.sp_zncc, subpixel=self.cb_subpixel, workers=self.sp_workers,
+            sort=self.cb_sort, ref_fixed=self.rb_ref_fixed,
+            manual_align=self.chk_manual_align, align_alpha=self.sl_align_alpha,
+            auto_scale=self.chk_auto_scale, vmin=self.sp_vmin, vmax=self.sp_vmax,
+            width_mm=self.sp_width, thick_mm=self.sp_thick,
+            xaxis=self.cb_xaxis, yaxis=self.cb_yaxis,
+        )
+        self._rt_panel.register_settings(self.settings)
+        # ウィンドウの大きさと分割位置も覚える
+        self.settings.add_custom("win_geom", lambda: [self.x(), self.y(), self.width(), self.height()],
+                                 lambda v: self.setGeometry(*[int(x) for x in v]))
+        self.settings.add_custom("split_right", lambda: self._right_vsplit_sizes,
+                                 lambda v: self._restore_right_split([int(x) for x in v]))
+        try:
+            n = self.settings.restore()
+            if n:
+                self._append_log(f"前回の設定を復元しました（{n} 項目）")
+        except Exception as e:
+            self._append_log(f"[WARN] 設定の復元に失敗: {e}")
+
+    def _restore_right_split(self, sizes):
+        self._right_vsplit_sizes = sizes
+        if self._frame_table_widget.isVisible():
+            self._right_vsplit.setSizes(sizes)
+
+    def _save_settings(self):
+        try:
+            if self._right_vsplit.sizes()[1] > 0:      # テーブルが見えているときの比率を保つ
+                self._right_vsplit_sizes = self._right_vsplit.sizes()
+            self.settings.save()
+        except Exception:
+            pass
 
     # ===================================================================
     # 設定パネル
@@ -2412,6 +2458,7 @@ class MainWindow(QMainWindow):
             f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
     def closeEvent(self, ev):
+        self._save_settings()      # 解析を止める前に保存する（停止処理で値が変わることがある）
         self._rt_panel.shutdown()
         self._on_stop()
         self._subset_win.close()

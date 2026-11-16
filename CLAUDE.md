@@ -15,6 +15,7 @@
 | `rt_source.py` | フレームソース（USBカメラ取得スレッド、合成変形デモ） |
 | `rt_panel.py` | リアルタイムマップタブの UI と解析ワーカー |
 | `rt_record.py` | 記録（常時一時記録 → 停止時に残すか決める）。読み出しは read_session() |
+| `settings_store.py` | GUI 設定の保存と復元（~/.livedic/settings.json） |
 | `check_gpu.py` | GPU 機で最初に実行。CuPy の可否、GPU/CPU 経路の数値一致、処理時間を表示 |
 | `build.bat` | PyInstaller exe ビルドスクリプト |
 | `make_icon.py` | cow.png → LiveDIC.ico 変換スクリプト |
@@ -86,6 +87,11 @@
 - カメラは Windows では `CAP_DSHOW` を使う（MSMF はオープンに 12 秒以上かかった）
 - ソースは UI 上はカメラのみ。タブを初めて開いたときに自動でカメラ検索し、見つかった最初のカメラでプレビューが始まる。コンボで選ぶ・解像度を変えるでも再オープン。プレビューボタン、合成デモ、動画ファイルソース、デモ動画生成は 2026-09-16 に UI から削除（`rt_source.SyntheticSource` / `VideoFileSource` は `check_gpu.py` と回帰テスト用にコードだけ残す）
 - GPU 経路を変更したら `python check_gpu.py`（と `--4k`）で CPU との数値一致を確認すること
+- **設定の保存（2026-11-17、`settings_store.py`）**: 終了時と解析開始時に `~/.livedic/settings.json` へ書き、起動時に復元する。`MainWindow._init_settings_store()` で登録（左パネルの共通項目＋リアルタイムタブ＋ウィンドウサイズ・分割位置）。ウィジェットでない状態（ROI・成分・カスタムスケール）は `add_custom(getter, setter)` で登録
+  - コンボは**表示文字列**で保存（カメラ一覧は順番が変わるため）。カメラは検索完了後に前回の名前を優先し、無ければ `pick_default_camera`
+  - ROI は解像度とセットで保存し、解像度が違えば復元しない（座標の意味が変わる）
+  - 読み書きとも項目ごとに try で囲み、壊れた設定ファイルでも既定値で起動する。書き込みは一時ファイル＋`replace` で既存を壊さない
+  - `cb_source` / `cb_res` の再オープンは `activated`（ユーザー操作のみ）に繋いであるので、復元の `setCurrentIndex` ではカメラが開き直らない
 - **バックエンド判定は「実際に使う CUDA ライブラリを小さく実行してから」行う**（2026-11-17）。CuPy の import とデバイス列挙が通っても、cuBLAS / cuFFT / cuSOLVER は最初の呼び出しで初めてロードされるため、それまで失敗が分からない。`dic_rt` の import 時に matmul（cuBLAS）・linalg.inv（cuSOLVER）・rfft2（cuFFT）・spline_filter を試し、1 つでも失敗したら GPU 不可として CPU に落とす。理由は `gpu_error()` に残り、GUI のログとツールチップ、`check_gpu.py` に出る。import は 1.4 s（うち CuPy 本体が大半。ライブラリのロードは従来も初回フレームで起きていたので実質の増分は小さく、代わりに初回フレームが詰まらなくなる）
 
 ### Smart App Control によるブロック（2026-11-17、実機デモ前に発生）
