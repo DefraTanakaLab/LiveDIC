@@ -75,6 +75,14 @@
 - カメラは Windows では `CAP_DSHOW` を使う（MSMF はオープンに 12 秒以上かかった）
 - ソースは UI 上はカメラのみ。タブを初めて開いたときに自動でカメラ検索し、見つかった最初のカメラでプレビューが始まる。コンボで選ぶ・解像度を変えるでも再オープン。プレビューボタン、合成デモ、動画ファイルソース、デモ動画生成は 2026-09-16 に UI から削除（`rt_source.SyntheticSource` / `VideoFileSource` は `check_gpu.py` と回帰テスト用にコードだけ残す）
 - GPU 経路を変更したら `python check_gpu.py`（と `--4k`）で CPU との数値一致を確認すること
+- **バックエンド判定は「実際に使う CUDA ライブラリを小さく実行してから」行う**（2026-11-17）。CuPy の import とデバイス列挙が通っても、cuBLAS / cuFFT / cuSOLVER は最初の呼び出しで初めてロードされるため、それまで失敗が分からない。`dic_rt` の import 時に matmul（cuBLAS）・linalg.inv（cuSOLVER）・rfft2（cuFFT）・spline_filter を試し、1 つでも失敗したら GPU 不可として CPU に落とす。理由は `gpu_error()` に残り、GUI のログとツールチップ、`check_gpu.py` に出る。import は 1.4 s（うち CuPy 本体が大半。ライブラリのロードは従来も初回フレームで起きていたので実質の増分は小さく、代わりに初回フレームが詰まらなくなる）
+
+### Smart App Control によるブロック（2026-11-17、実機デモ前に発生）
+- 症状: 「バックエンド: GPU」と表示されたまま **毎フレーム `解析エラー: DLL load failed while importing cufft: アプリケーション制御ポリシーによってこのファイルがブロックされました。` で処理 0 フレーム**
+- 原因: Windows の **スマート アプリ コントロール**（SAC）。pip の `nvidia-*` wheel の DLL も CuPy の `cufft.cp313-win_amd64.pyd` 等も **すべて未署名**で、SAC は未署名バイナリのロードを拒否する。ブロックされたのは cuBLAS / cuFFT / cuSOLVER / cuRAND。**elementwise カーネル（nvrtc）と cupyx.ndimage は通る**ので「GPU は使えている」ように見えるのが厄介
+- 9 月は動いていたのに 11/17 に壊れたのは、SAC のポリシーが前夜 23:52 に更新され Enforce になったため（`HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy` の `VerifiedAndReputablePolicyState` が 1）。ブロック記録は イベントビューア → `Microsoft-Windows-CodeIntegrity/Operational`（ID 3033/3077、Policy ID `{0283ac0f-...}` が SAC）
+- 対処: **SAC をオフ**（Windows セキュリティ → アプリとブラウザー コントロール → スマート アプリ コントロール → オフ）。再起動不要で即反映。SAC には例外リストが無いのでこれ以外に方法がない。かつては「オフにすると Windows 再インストールまで戻せない」仕様だったが、24H2 build 26100.8116 / 25H2 build 26200.8116 以降は戻せる（この PC は 25H2 26200.9974 で、オフ後も「オン」が選択可能なまま）
+- 同じ環境を他機で作るときは、セットアップ手順に SAC の確認を入れること
 
 ### 引き継ぎ状況（2026-09-16 時点）
 - 開発は GPU 無しの i7-9700 機で行い、実機（400-CAM106・白テープ＋スプレーのスペックル・1080p 30fps）で CPU のみで追従できることを確認済み。以降は **GPU 搭載機（Ryzen 9 8945HX + RTX 5070 Ti Laptop、Python 3.13、`C:\tools\LiveDIC`）で続きを行う**
@@ -89,6 +97,7 @@
   - 終了時は必ず `rt_source.stop_all_sources()` で解放（`main()` の aboutToQuit / finally / atexit）。スロット内の未捕捉例外は `sys.excepthook` でログに出してアプリを生かす（PyQt6 の既定は abort で後始末が走らない）
   - 実験中に固まったら USB を抜き差し → LiveDIC の「カメラ検索」を押す。抜き差し後の open は 0.8 s 程度で戻る
 - カメラ: 400-CAM106 を採用方向（近接用・固定フォーカス・歪み小）。Insta360 Link 2C Pro は広角の樽型歪み（端で 8%）と自動機能（HDR・AF・オートフレーミング）のため不採用方向
+  - ただし **2026-11-17 のデモでは事情により Insta360 Link 2C を使用**（歪みは承知の上で許容。定量値を論じる用途ではない）。本番の測定で使う場合はレンズ歪み補正が要る（`cv2.undistort`、未実装）
 - 400-CAM106 の注意: 1080p は設定順序次第で非圧縮 YUY2（2.5fps）に落ちる。`CameraSource` は fps→解像度→FOURCC の順で設定済み。4K は MJPG 15fps。付属アプリ（UMviewer）を閉じないと DirectShow で開けない
 - 未対応: 2点間モードへの IC-GN 適用、レンズ歪み補正（`cv2.undistort`。Insta360 を使う場合のみ必要）
 - **既知の問題（保留・ユーザー了承済み）**: 変形速度が速いとひずみマップが「糸を引いた」ように見える。見失った点を直近の追従位置で描き NaN を近傍中央値で埋める修正（307cc56）後も残る。メディアンフィルタは原因ではない。未確認の候補: (1) 「参照位置」モードでも出るか（出るなら追従描画ではなく変位・ひずみ値そのもの）(2) 速い変形時のカメラのモーションブラー (3) 速度外挿の予測外れによる誤マッチ。再現時は描画位置を「参照位置」に切り替えて切り分けるのが最初の一手

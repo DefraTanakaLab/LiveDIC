@@ -25,6 +25,10 @@ def main():
     if not dic_rt.gpu_available():
         print(f"  理由: {dic_rt.gpu_error() or 'cupy が import できない'}")
         print('  pip install "cupy-cuda12x[ctk]" を実行し、nvidia-smi で CUDA 12.x 以降のドライバを確認してください。')
+        if "ブロック" in dic_rt.gpu_error() or "blocked" in dic_rt.gpu_error().lower():
+            print("  アプリケーション制御ポリシーによるブロックです。Windows の「スマート アプリ コントロール」は")
+            print("  pip の nvidia-* と CuPy の .pyd が未署名のため cuBLAS/cuFFT/cuSOLVER を丸ごと止めます。")
+            print("  Windows セキュリティ → アプリとブラウザー コントロール →スマート アプリ コントロール → オフ。")
         print("  RTX 50 系 (Blackwell, sm_120) は CUDA 12.8 以降に対応した CuPy が必要です。")
         return 1
 

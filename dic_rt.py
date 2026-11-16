@@ -33,18 +33,30 @@ _GPU_ERROR = ""
 try:
     import cupy as _cupy
     import cupyx as _cupyx_mod
+    from cupyx.scipy import ndimage as _cupyx_ndi
     if _cupy.cuda.runtime.getDeviceCount() > 0:
         _props = _cupy.cuda.runtime.getDeviceProperties(0)
         _name = _props.get("name", b"")
         _GPU_NAME = _name.decode() if isinstance(_name, bytes) else str(_name)
-        # 実際にカーネルが動くか確認（sm 非対応などで import は通るが実行不能な場合を検出）
-        _cupy.arange(4).sum()
+        # 実際に使う機能をすべて小さく実行してから GPU 可と判定する。
+        # CuPy の import やデバイス列挙が通っても、個々の CUDA ライブラリは最初の呼び出しで
+        # 初めてロードされるため、ここで試さないと「GPU 利用可」と表示したまま毎フレーム
+        # 例外を投げて 1 フレームも処理できない状態になる（2026-11-17 に実機で発生）。
+        #   例: Windows の Smart App Control は pip の nvidia-* wheel と CuPy の .pyd が
+        #       未署名なので cuBLAS / cuFFT / cuSOLVER / cuRAND を丸ごとブロックする
+        _probe = _cupy.ones((8, 8), _cupy.float32)
+        _cupy.arange(4).sum()                                  # カーネル起動（sm 非対応の検出）
+        _cupy.matmul(_probe, _probe)                           # cuBLAS（ZNCC 分母・IC-GN）
+        _cupy.linalg.inv(_cupy.eye(3, dtype=_cupy.float32))    # cuSOLVER（IC-GN の逆合成更新）
+        _cupy.fft.rfft2(_probe)                                # cuFFT（ZNCC 分子）
+        _cupyx_ndi.spline_filter(_probe, order=3, output=_cupy.float32, mode="mirror")  # IC-GN 補間
+        _cupy.cuda.Device().synchronize()
         _cp = _cupy
         _cupyx = _cupyx_mod
-except Exception as _e:  # ImportError, CUDARuntimeError など
+except Exception as _e:  # ImportError, CUDARuntimeError, アプリ制御ポリシーによるブロックなど
     _cp = None
     _cupyx = None
-    _GPU_ERROR = str(_e)
+    _GPU_ERROR = f"{type(_e).__name__}: {_e}".split("\n")[0]
 
 
 if _cp is not None:

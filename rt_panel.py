@@ -517,6 +517,10 @@ class RTMapPanel(QWidget):
 
     def bind_host(self):
         """host 側の設定パネル（sp_subset / sp_step）が構築された後に main.py から呼ぶ。"""
+        self.host._append_log(f"リアルタイムマップ: バックエンド {dic_rt.backend_name()}")
+        if not dic_rt.gpu_available() and dic_rt.gpu_error():
+            # GPU があるのに使えない場合は理由を必ず見せる（ツールチップだけでは気づかれない）
+            self.host._append_log(f"[WARN] GPU 利用不可のため CPU で動作します: {dic_rt.gpu_error()}")
         self._update_params_label()
         self.host.sp_subset.valueChanged.connect(self._update_params_label)
         self.host.sp_step.valueChanged.connect(self._update_params_label)
