@@ -12,6 +12,7 @@ main.py からは RTMapPanel(host, canvas_factory) で生成する。host は
 """
 from __future__ import annotations
 import time
+import pathlib
 from typing import Optional, List, Tuple
 
 import numpy as np
@@ -21,7 +22,8 @@ import matplotlib
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QSpinBox, QDoubleSpinBox, QRadioButton, QButtonGroup,
-    QSlider, QCheckBox, QSizePolicy, QDialog, QDialogButtonBox, QFormLayout,
+    QSlider, QCheckBox, QSizePolicy, QDialog, QDialogButtonBox, QFormLayout, QMessageBox,
+    QLineEdit, QFileDialog,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QKeySequence, QShortcut
@@ -29,6 +31,7 @@ from PyQt6.QtGui import QPixmap, QImage, QPainter, QKeySequence, QShortcut
 import dic_core
 import dic_rt
 import rt_source
+import rt_record
 
 STRAIN_KEYS = ["exx", "eyy", "exy"]
 STRAIN_LABELS = {"exx": "εxx", "eyy": "εyy", "exy": "εxy"}
@@ -176,6 +179,93 @@ class RTDisplayWindow(QWidget):
         super().closeEvent(ev)
 
 
+class _SaveDialog(QDialog):
+    """
+    解析停止後に「残す / 一部だけ残す / 捨てる」を選ぶ。
+
+    記録するかどうかの判断をここまで遅らせるのが狙い（開始前に決めると、調整のたびに録って
+    容量が膨らむか、録り忘れて本番を逃すかのどちらかになる）。
+    """
+
+    def __init__(self, rec, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("記録を残しますか？")
+        self.setModal(True)
+        self.rec = rec
+        self.choice = None                      # ("all"| "marker"| "last"| None), 値
+        dur = (rec.t_last - rec.t_first) if (rec.t_first is not None and rec.t_last is not None) else 0.0
+        lay = QVBoxLayout(self)
+        head = QLabel(f"{rec.n_frames:,} フレーム / {int(dur // 60):02d}:{int(dur % 60):02d} / "
+                      f"{rec.disk_bytes() / 1e6:,.0f} MB"
+                      + (f" / マーカー {len(rec.markers)} 個" if rec.markers else ""))
+        head.setStyleSheet("font-size:12px;")
+        lay.addWidget(head)
+
+        self._bg = QButtonGroup(self)
+        self.rb_all = QRadioButton("すべて残す")
+        self.rb_all.setChecked(True)
+        self._bg.addButton(self.rb_all); lay.addWidget(self.rb_all)
+
+        row_m = QHBoxLayout()
+        self.rb_mark = QRadioButton("マーカーの前後")
+        self.rb_mark.setEnabled(bool(rec.markers))
+        self._bg.addButton(self.rb_mark); row_m.addWidget(self.rb_mark)
+        self.sp_mark = QSpinBox(); self.sp_mark.setRange(1, 600); self.sp_mark.setValue(30)
+        self.sp_mark.setSuffix(" 秒"); self.sp_mark.setEnabled(False)
+        row_m.addWidget(self.sp_mark); row_m.addStretch(); lay.addLayout(row_m)
+
+        row_l = QHBoxLayout()
+        self.rb_last = QRadioButton("最後の")
+        self._bg.addButton(self.rb_last); row_l.addWidget(self.rb_last)
+        self.sp_last = QDoubleSpinBox(); self.sp_last.setRange(0.1, 600); self.sp_last.setValue(2.0)
+        self.sp_last.setDecimals(1); self.sp_last.setSuffix(" 分"); self.sp_last.setEnabled(False)
+        row_l.addWidget(self.sp_last); row_l.addStretch(); lay.addLayout(row_l)
+
+        self.rb_mark.toggled.connect(self.sp_mark.setEnabled)
+        self.rb_last.toggled.connect(self.sp_last.setEnabled)
+
+        self.lbl_dest = QLabel(f"保存先: {rec.base}")
+        self.lbl_dest.setStyleSheet("color:#888;font-size:9px;")
+        self.lbl_dest.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.lbl_dest.setMinimumWidth(1)
+        lay.addWidget(self.lbl_dest)
+
+        bb = QDialogButtonBox()
+        self.b_keep = bb.addButton("保存", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.b_drop = bb.addButton("破棄", QDialogButtonBox.ButtonRole.DestructiveRole)
+        self.b_drop.setStyleSheet("color:#e57373;")
+        self.b_keep.clicked.connect(self._accept_keep)
+        self.b_drop.clicked.connect(self._confirm_discard)
+        lay.addWidget(bb)
+        self.b_keep.setDefault(True); self.b_keep.setFocus()
+
+    def _accept_keep(self):
+        if self.rb_mark.isChecked():
+            self.choice = ("marker", float(self.sp_mark.value()))
+        elif self.rb_last.isChecked():
+            self.choice = ("last", float(self.sp_last.value()) * 60.0)
+        else:
+            self.choice = ("all", None)
+        self.accept()
+
+    def _confirm_discard(self):
+        # 破棄は取り消せないので一度だけ確認する
+        box = QMessageBox(QMessageBox.Icon.Warning, "記録の破棄",
+                          f"{self.rec.n_frames:,} フレームの記録を削除します。元に戻せません。",
+                          QMessageBox.StandardButton.Cancel, self)
+        yes = box.addButton("破棄する", QMessageBox.ButtonRole.DestructiveRole)
+        box.exec()
+        if box.clickedButton() is yes:
+            self.choice = None
+            self.accept()
+
+    def closeEvent(self, ev):
+        # ウィンドウを閉じただけでは消さない（判断を保留＝そのまま残す）
+        if self.choice is None and self.result() != QDialog.DialogCode.Accepted:
+            self.choice = ("all", None)
+        super().closeEvent(ev)
+
+
 class _ScaleDialog(QDialog):
     """スケール「カスタム」選択時に最小・最大を入力する小ウィンドウ。値は % 単位。"""
 
@@ -224,12 +314,16 @@ class RTWorker(QThread):
     sig_log = pyqtSignal(str)
     sig_error = pyqtSignal(str)
 
+    sig_recorder = pyqtSignal(object)      # 記録開始を UI に伝える（グリッドが確定してから作る）
+
     def __init__(self, source: rt_source.FrameSource, ref_gray: np.ndarray,
-                 tracker_kwargs: dict, parent=None):
+                 tracker_kwargs: dict, rec_opts: Optional[dict] = None, parent=None):
         super().__init__(parent)
         self.source = source
         self.ref_gray = ref_gray
         self.kw = tracker_kwargs
+        self.rec_opts = rec_opts        # None なら記録しない
+        self.recorder: Optional[rt_record.Recorder] = None
         self._stop = False
         self.tracker: Optional[dic_rt.RTTracker] = None
 
@@ -245,6 +339,24 @@ class RTWorker(QThread):
         tr = self.tracker
         self.sig_log.emit(f"リアルタイム解析開始: {tr.N} 点 ({tr.ny}×{tr.nx})  "
                           f"backend={dic_rt.backend_name(tr.use_gpu)}  threads={tr.n_threads}")
+        # 記録は開始と同時に無条件で始める（残すかどうかは停止時に決める）
+        if self.rec_opts is not None:
+            try:
+                meta = dict(self.rec_opts.get("meta", {}))
+                meta.update({"backend": dic_rt.backend_name(tr.use_gpu), "subset": tr.subset,
+                             "step": tr.step, "search_stages": list(tr.stages),
+                             "zncc_threshold": tr.zncc_thr, "reref_zncc": tr.reref_zncc,
+                             "icgn": bool(tr.icgn)})
+                self.recorder = rt_record.Recorder(
+                    self.rec_opts["base_dir"], self.ref_gray, tr.X, tr.Y, meta,
+                    fps=self.rec_opts.get("fps", 30.0),
+                    video_budget_gb=self.rec_opts.get("video_budget_gb", 10.0),
+                    video=self.rec_opts.get("video", True))
+                self.sig_log.emit(f"記録開始（一時）: {self.recorder.dir.name}")
+            except Exception as e:
+                self.recorder = None
+                self.sig_error.emit(f"記録を開始できません: {e}")
+        self.sig_recorder.emit(self.recorder)
         t_start = time.perf_counter()
         last_id = -1
         n_proc = 0
@@ -282,7 +394,15 @@ class RTWorker(QThread):
             if res["stats"]["rereferenced"]:
                 self.sig_log.emit(f"  自動再参照 #{res['stats']['n_reref']}  "
                                   f"(t={elapsed:.1f}s, 中央値ZNCC={res['stats']['median_zncc']:.3f})")
+            if self.recorder is not None:
+                try:
+                    self.recorder.add_frame(elapsed, res, self.source.fps, proc_fps)
+                except Exception as e:
+                    self.sig_error.emit(f"記録エラー: {e}")
+                    self.recorder = None
             self.sig_result.emit(out)
+        if self.recorder is not None:
+            self.recorder.close()      # ファイルを閉じるだけ。残すかは UI 側で決める
         self.sig_log.emit(f"リアルタイム解析停止: 処理 {n_proc} フレーム / 間引き {n_skip} フレーム / 再参照 {tr.n_reref} 回")
 
 
@@ -301,6 +421,8 @@ class RTMapPanel(QWidget):
         self._latest_drawn_fid = -1
         self._preview_fid = -1
         self._ref_gray: Optional[np.ndarray] = None
+        self._rec: Optional[rt_record.Recorder] = None    # 解析中の一時記録
+        self._rec_t = 0.0                                 # 記録中表示の更新間引き用
         self._lut = _lut(CMAPS[0])
         self._comp = "exx"
         self._cam_list: List[Tuple[int, str]] = []
@@ -473,8 +595,46 @@ class RTMapPanel(QWidget):
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._stop)
         row4.addWidget(self.btn_stop)
+        # 記録は開始と同時に無条件で始まり、残すかどうかは停止時に決める（rt_record の設計）。
+        # 試験中にできるのは「ここ」の印を付けることだけ
+        self.btn_mark = QPushButton("★ マーカー (M)")
+        self.btn_mark.setToolTip("「ここ」の印を記録に残す。停止後にマーカー前後だけ保存できる")
+        self.btn_mark.setEnabled(False)
+        self.btn_mark.clicked.connect(self._mark)
+        row4.addWidget(self.btn_mark)
+        QShortcut(QKeySequence("M"), self, activated=self._mark)
+        self.lbl_rec = QLabel("")
+        self.lbl_rec.setStyleSheet("color:#e57373;font-size:10px;")
+        row4.addWidget(self.lbl_rec)
         row4.addStretch()
         lay.addLayout(row4)
+
+        # ---- 行5：記録設定 ----
+        row5 = QHBoxLayout()
+        self.chk_record = QCheckBox("記録する")
+        self.chk_record.setChecked(True)
+        self.chk_record.setToolTip("解析開始と同時に一時フォルダへ記録し、停止時に残すか決める")
+        row5.addWidget(self.chk_record)
+        self.chk_rec_video = QCheckBox("映像も")
+        self.chk_rec_video.setChecked(True)
+        self.chk_rec_video.setToolTip("表示そのままの映像を mp4 で記録（約 1.2 MB/s）。数値データは常に全フレーム記録する")
+        row5.addWidget(self.chk_rec_video)
+        row5.addWidget(QLabel("映像の上限:"))
+        self.sp_budget = QDoubleSpinBox(); self.sp_budget.setRange(0.5, 500); self.sp_budget.setValue(10.0)
+        self.sp_budget.setDecimals(1); self.sp_budget.setSuffix(" GB"); self.sp_budget.setFixedWidth(80)
+        self.sp_budget.setToolTip("一時記録中の映像がこれを超えたら古い方から捨てる（直近は必ず残る）")
+        row5.addWidget(self.sp_budget)
+        row5.addWidget(QLabel("保存先:"))
+        self.edit_dir = QLineEdit()
+        self.edit_dir.setPlaceholderText(str(pathlib.Path.home() / "LiveDIC_RT"))
+        self.edit_dir.setMinimumWidth(1)
+        row5.addWidget(self.edit_dir, stretch=1)
+        btn_dir = QPushButton("…"); btn_dir.setFixedWidth(28)
+        btn_dir.clicked.connect(self._browse_dir)
+        row5.addWidget(btn_dir)
+        self.chk_record.toggled.connect(lambda on: [w.setEnabled(on) for w in
+                                                    (self.chk_rec_video, self.sp_budget, self.edit_dir, btn_dir)])
+        lay.addLayout(row5)
 
         # ---- ステータス ----
         self.lbl_status = QLabel("待機中 — カメラを検索しています…")
@@ -570,6 +730,7 @@ class RTMapPanel(QWidget):
         super().showEvent(ev)
         if not self._scanned:
             self._scanned = True
+            QTimer.singleShot(0, self.check_stale_recordings)
             self._scan_cameras()
 
     def _stop_source(self):
@@ -640,6 +801,11 @@ class RTMapPanel(QWidget):
                                     f"→ {X.size} 点 ({X.shape[0]}×{X.shape[1]})")
         except Exception:
             self.lbl_params.setText("グリッド生成不可")
+
+    def _browse_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "記録の保存先を選択", self.edit_dir.text().strip())
+        if d:
+            self.edit_dir.setText(d)
 
     def _quality(self):
         img = None
@@ -761,11 +927,13 @@ class RTMapPanel(QWidget):
                 self._ext.hide()
             self.cb_rot.setEnabled(False)
 
-    def _show_rgb(self, rgb: np.ndarray):
-        """タブ内キャンバスに表示し、別ウィンドウが開いていればそちらにも同じ画像を送る。"""
+    def _show_rgb(self, rgb: np.ndarray, t: Optional[float] = None):
+        """タブ内キャンバスに表示し、別ウィンドウと記録にも同じ画像を送る。"""
         self.canvas.set_image(rgb_to_qpixmap(rgb))
         if self._ext is not None and self._ext.isVisible():
             self._ext.set_frame(rgb)
+        if self._rec is not None and t is not None:
+            self._rec.add_display(rgb, t)      # 書き込みは別スレッド（呼び出しは軽い）
 
     def _set_status(self, text: str):
         self.lbl_status.setText(text)
@@ -799,42 +967,115 @@ class RTMapPanel(QWidget):
         fid, ts, gray = self._source.latest()
         self._ref_gray = gray.copy()
         try:
-            self._worker = RTWorker(self._source, self._ref_gray, self._tracker_kwargs(), self)
+            self._worker = RTWorker(self._source, self._ref_gray, self._tracker_kwargs(),
+                                    self._rec_opts(), self)
         except Exception as e:
             self.lbl_status.setText(f"開始エラー: {e}")
             return
         self._worker.sig_result.connect(self._on_result)
         self._worker.sig_log.connect(self.host._append_log)
         self._worker.sig_error.connect(lambda m: self.host._append_log(f"[ERROR] {m}"))
+        self._worker.sig_recorder.connect(self._on_recorder)
         self._worker.start()
         self._latest = None
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
+        self.btn_mark.setEnabled(True)
         for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
                     self.sp_zncc, self.sp_reref, self.chk_gpu, self.btn_scan,
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.host.chk_icgn):
             wdg.setEnabled(False)
         self.host._append_log(f"参照取得: フレーム {fid}")
 
-    def _stop(self):
+    def _stop(self, ask: bool = True):
         if self._worker is None:
             return
         self._worker.stop()
-        self._worker.wait(3000)
+        self._worker.wait(5000)
         self._worker = None
         self.btn_start.setEnabled(self._source is not None)
         self.btn_stop.setEnabled(False)
+        self.btn_mark.setEnabled(False)
         for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
                     self.sp_zncc, self.sp_reref, self.btn_scan,
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.host.chk_icgn):
             wdg.setEnabled(True)
         self.chk_gpu.setEnabled(dic_rt.gpu_available())
         self.lbl_status.setText("解析停止")
+        self.lbl_rec.setText("")
+        self._finish_recording(ask)
+
+    # ------------------------------------------------------------------
+    # 記録（開始時は無条件、停止時に残すか決める）
+    # ------------------------------------------------------------------
+    def _rec_opts(self) -> Optional[dict]:
+        if not self.chk_record.isChecked():
+            return None
+        base = self.edit_dir.text().strip() or str(pathlib.Path.home() / "LiveDIC_RT")
+        self.edit_dir.setText(base)
+        src_fps = self._source.fps if (self._source is not None and self._source.fps > 1) else 30.0
+        return {"base_dir": base, "fps": src_fps, "video": self.chk_rec_video.isChecked(),
+                "video_budget_gb": float(self.sp_budget.value()),
+                "meta": {"camera": self.cb_source.currentText(),
+                         "resolution": list(RESOLUTIONS[self.cb_res.currentIndex()]),
+                         "roi": list(self._roi) if self._roi else None}}
+
+    def _on_recorder(self, rec):
+        self._rec = rec
+
+    def _mark(self):
+        if self._rec is not None and self._worker is not None:
+            self._rec.mark()
+            self.host._append_log(f"★ マーカー {len(self._rec.markers)}（t={self._rec.t_last:.1f}s）")
+
+    def _finish_recording(self, ask: bool):
+        rec, self._rec = self._rec, None
+        if rec is None:
+            return
+        rec.close()
+        if rec.n_frames == 0:
+            rec.discard(); return
+        if not ask:
+            rec.keep(); return
+        dlg = _SaveDialog(rec, self)
+        dlg.exec()
+        try:
+            if dlg.choice is None:
+                rec.discard()
+                self.host._append_log("記録を破棄しました")
+                return
+            kind, val = dlg.choice
+            t0 = t1 = None
+            if kind == "marker" and rec.markers:
+                t0 = max(0.0, min(m[1] for m in rec.markers) - val)
+                t1 = max(m[1] for m in rec.markers) + val
+            elif kind == "last":
+                t1 = rec.t_last
+                t0 = max(0.0, rec.t_last - val)
+            dest = rec.keep(t0, t1)
+            self.host._append_log(f"記録を保存: {dest}（{rt_record.session_bytes(dest)/1e6:,.0f} MB）")
+        except Exception as e:
+            self.host._append_log(f"[ERROR] 記録の保存に失敗: {e}（フォルダは {rec.dir} に残っています）")
+
+    def check_stale_recordings(self):
+        """起動時に、前回クラッシュして残った記録を見つけたら残すか聞く（自動では消さない）。"""
+        base = self.edit_dir.text().strip() or str(pathlib.Path.home() / "LiveDIC_RT")
+        for p in rt_record.find_stale(base):
+            mb = rt_record.session_bytes(p) / 1e6
+            box = QMessageBox(QMessageBox.Icon.Question, "前回の記録が残っています",
+                              f"{p.name}\n{mb:,.0f} MB\n\n前回の解析が正常に終了しなかったようです。"
+                              f"\nこの記録を残しますか？", parent=self)
+            b_keep = box.addButton("残す", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("削除", QMessageBox.ButtonRole.DestructiveRole)
+            box.exec()
+            dest = rt_record.recover(str(p), box.clickedButton() is b_keep)
+            self.host._append_log(f"前回の記録: {p.name} → " + (f"{dest}" if dest else "削除"))
 
     def shutdown(self):
         """アプリ終了時に呼ぶ。"""
         self._timer.stop()
-        self._stop()
+        # 終了時は確認ダイアログを出さずに残す（閉じる操作で記録を失わせない）
+        self._stop(ask=False)
         self._stop_source()
         if self._ext is not None:
             self._ext.close()
@@ -851,8 +1092,11 @@ class RTMapPanel(QWidget):
             if out["fid"] == self._latest_drawn_fid:
                 return
             self._latest_drawn_fid = out["fid"]
-            self._draw_result(out["gray"], out["res"])
+            self._draw_result(out["gray"], out["res"], out["elapsed"])
             st = out["res"]["stats"]
+            if self._rec is not None and out["elapsed"] - self._rec_t >= 1.0:
+                self._rec_t = out["elapsed"]
+                self.lbl_rec.setText("● " + self._rec.status())
             self._set_status(
                 f"取得 {out['src_fps']:.1f} fps | 解析 {out['proc_fps']:.1f} fps ({st['proc_time'] * 1000:.0f} ms) "
                 f"| 間引き {out['n_skip']} | 中央値ZNCC {st['median_zncc']:.3f} | 不良 {st['frac_bad'] * 100:.1f}% "
@@ -880,7 +1124,7 @@ class RTMapPanel(QWidget):
             self._set_status(f"プレビュー中: {fr[2].shape[1]}×{fr[2].shape[0]}  {self._source.fps:.1f} fps"
                              f"  — ROI を設定して「参照取得＆解析開始」")
 
-    def _draw_result(self, gray: np.ndarray, res: dict):
+    def _draw_result(self, gray: np.ndarray, res: dict, t: Optional[float] = None):
         data = res.get(self._comp)
         vmin, vmax = self._scale()
         alpha = int(self.sl_alpha.value() * 2.55)
@@ -891,7 +1135,7 @@ class RTMapPanel(QWidget):
                                          U=res.get("U_draw", res["U"]) if follow else None,
                                          V=res.get("V_draw", res["V"]) if follow else None)
         rgb = dic_rt.compose_overlay(gray, rgba)
-        self._show_rgb(rgb)
+        self._show_rgb(rgb, t)
 
 
 class _ScanThread(QThread):
