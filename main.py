@@ -65,6 +65,12 @@ QPushButton                  {background:#333;border:1px solid #555;
                               border-radius:3px;padding:4px 12px;}
 QPushButton:hover            {background:#444;}
 QPushButton:disabled         {background:#2a2a2a;color:#555;}
+/* 押しっぱなしのボタン（ROI設定・別ウィンドウ表示・フォーカス固定）は、
+   ON のとき見た目で分かるようにする。既定のままだと OFF と区別がつかない */
+QPushButton:checked          {background:#1565c0;color:#fff;border-color:#42a5f5;}
+QPushButton:checked:hover    {background:#1976d2;}
+QPushButton#btn_focus:checked      {background:#ef6c00;color:#fff;border-color:#ff9800;font-weight:bold;}
+QPushButton#btn_focus:checked:hover{background:#f57c00;}
 QPushButton#btn_start        {background:#2e7d32;color:#fff;font-weight:bold;}
 QPushButton#btn_start:hover  {background:#388e3c;}
 QPushButton#btn_stop         {background:#c62828;color:#fff;font-weight:bold;}
