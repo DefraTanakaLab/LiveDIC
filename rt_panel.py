@@ -475,10 +475,17 @@ class RTMapPanel(QWidget):
         self.lbl_roi = QLabel("ROI: 全域")
         self.lbl_roi.setStyleSheet("color:#888;font-size:9px;")
         row2.addWidget(self.lbl_roi)
+        # サブセット・ステップがスペックルに対して適切かをプレビュー上で確かめるための表示
+        self.chk_subset = QCheckBox("サブセット表示")
+        self.chk_subset.setToolTip("解析点（青い点）とサブセットの実寸（青い枠）をプレビューに重ねる。"
+                                   "スペックルがサブセット内に十分入っているか確認する。解析中は表示しない")
+        self.chk_subset.toggled.connect(self._update_overlays)
+        row2.addWidget(self.chk_subset)
         row2.addSpacing(12)
         row2.addWidget(QLabel("探索 ±"))
         self.sp_r1 = QSpinBox(); self.sp_r1.setRange(1, 100); self.sp_r1.setValue(10); self.sp_r1.setFixedWidth(46)
         self.sp_r1.setToolTip("探索半径 [px]。予測位置を中心に全点をこの範囲で探索する")
+        self.sp_r1.valueChanged.connect(lambda _v: (self._update_params_label(), self._update_overlays()))
         # GPU では第 2 段は FFT 相関で ±50 全点でも 16 ms なので既定を広げる（CPU は計算量上限で省略されるため 30 のまま）
         self.sp_r2 = QSpinBox(); self.sp_r2.setRange(0, 200); self.sp_r2.setFixedWidth(46)
         self.sp_r2.setValue(50 if dic_rt.gpu_available() else 30)
@@ -685,6 +692,7 @@ class RTMapPanel(QWidget):
         store.add_many(
             rt_source=self.cb_source, rt_res=self.cb_res, rt_gpu=self.chk_gpu,
             rt_r1=self.sp_r1, rt_r2=self.sp_r2, rt_zncc=self.sp_zncc, rt_reref=self.sp_reref,
+            rt_subset_view=self.chk_subset,
             rt_rate_win=self.sp_rate_win, rt_rate_smooth=self.chk_rate_smooth,
             rt_pos_follow=self.rb_pos_follow,
             rt_cmap=self.cb_cmap, rt_alpha=self.sl_alpha, rt_rot=self.cb_rot,
@@ -725,6 +733,8 @@ class RTMapPanel(QWidget):
 
     def bind_host(self):
         """host 側の設定パネル（sp_subset / sp_step）が構築された後に main.py から呼ぶ。"""
+        self.host.sp_subset.valueChanged.connect(lambda _v: self._update_overlays())
+        self.host.sp_step.valueChanged.connect(lambda _v: self._update_overlays())
         self.host._append_log(f"リアルタイムマップ: バックエンド {dic_rt.backend_name()}")
         if not dic_rt.gpu_available() and dic_rt.gpu_error():
             # GPU があるのに使えない場合は理由を必ず見せる（ツールチップだけでは気づかれない）
@@ -823,15 +833,50 @@ class RTMapPanel(QWidget):
     def _clear_roi(self):
         self._roi = None
         self.lbl_roi.setText("ROI: 全域")
-        self.canvas.clear_overlays()
         self._update_params_label()
+        self._update_overlays()
 
     def _draw_roi_overlay(self):
+        self._update_overlays()
+
+    def _update_overlays(self):
+        """ROI 枠と、「サブセット表示」ON ならグリッド点＋サブセット枠を重ねる。"""
         self.canvas.clear_overlays()
         if self._roi:
             x1, y1, x2, y2 = self._roi
             self.canvas.add_overlay({"type": "rect", "x1": x1, "y1": y1, "x2": x2, "y2": y2,
                                      "color": "#ffaa00"})
+        # 解析中は出さない。ひずみマップのセルがグリッドそのものを示しているうえ、
+        # 数千点を毎フレーム描くと GUI が重くなる（設定を決めるためのものなのでプレビュー専用）
+        if not self.chk_subset.isChecked() or self._worker is not None:
+            return
+        shape = None
+        if self._source is not None and self._source.shape is not None:
+            shape = self._source.shape
+        elif self._ref_gray is not None:
+            shape = self._ref_gray.shape
+        if shape is None:
+            return
+        try:
+            S = self.host.sp_subset.value() | 1
+            X, Y = dic_core.create_grid(shape, S, self.sp_r1.value(), self.host.sp_step.value(), self._roi)
+        except Exception:
+            return
+        if X.size == 0:
+            return
+        xs, ys = X.ravel(), Y.ravel()
+        # 点が多いと描画が重いので間引く（間隔の見え方は変わらない）
+        stride = max(1, int(np.ceil(xs.size / 2000)))
+        self.canvas.add_overlay({"type": "grid",
+                                 "points": [(int(x), int(y)) for x, y in zip(xs[::stride], ys[::stride])]})
+        # サブセットの実寸は数点だけ枠で示す（全点に描くと潰れて見えない）
+        ny, nx = X.shape
+        h = S // 2
+        picks = {(ny // 2, nx // 2), (0, 0), (0, nx - 1), (ny - 1, 0), (ny - 1, nx - 1)}
+        for iy, ix in picks:
+            cx, cy = int(X[iy, ix]), int(Y[iy, ix])
+            self.canvas.add_overlay({"type": "rect", "x1": cx - h, "y1": cy - h,
+                                     "x2": cx + h, "y2": cy + h, "color": "#4fc3f7"})
 
     def _update_params_label(self):
         if not hasattr(self.host, "sp_subset"):
@@ -1034,6 +1079,7 @@ class RTMapPanel(QWidget):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_mark.setEnabled(True)
+        self._update_overlays()       # 解析中はグリッド表示を消す（ROI 枠は残す）
         for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
                     self.sp_zncc, self.sp_reref, self.chk_gpu, self.btn_scan,
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.host.chk_icgn):
@@ -1059,6 +1105,7 @@ class RTMapPanel(QWidget):
         self.chk_gpu.setEnabled(dic_rt.gpu_available())
         self.lbl_status.setText("解析停止")
         self.lbl_rec.setText("")
+        self._update_overlays()
         self._finish_recording(ask)
 
     # ------------------------------------------------------------------
