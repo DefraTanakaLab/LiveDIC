@@ -320,6 +320,27 @@ class ImageCanvas(QLabel):
                 for gx, gy in pts:
                     wx_, wy_ = self._img_to_widget(gx, gy)
                     p.drawPoint(int(wx_), int(wy_))
+            elif t == "subsets":
+                # 全点のサブセット枠。1 点ずつ overlay にすると setPen の回数で重くなるので
+                # まとめて 1 項目で受け取り、ペン設定 1 回で描く。
+                # サブセット > ステップ のときは枠が重なって画像を覆い隠すので半透明で描く
+                # points は全解析点（点で表示）、boxes は枠を描く点（重ならない間隔に間引き済み）
+                pts = item.get("points", [])
+                boxes = item.get("boxes", pts)
+                half = item.get("size", 21) / 2.0
+                sx = self._img_to_widget(1, 0)[0] - self._img_to_widget(0, 0)[0]   # 表示倍率
+                side = max(1, int(round(2 * half * sx)))
+                p.setPen(QPen(color, 1))
+                p.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                for gx, gy in boxes:
+                    wx_, wy_ = self._img_to_widget(gx - half, gy - half)
+                    p.drawRect(int(wx_), int(wy_), side, side)
+                # 解析点は全点を小さな点で（枠を間引いても実際の点密度が分かる）
+                dim = QColor(color); dim.setAlpha(150)
+                p.setPen(QPen(dim, 1))
+                for gx, gy in pts:
+                    wx_, wy_ = self._img_to_widget(gx, gy)
+                    p.drawPoint(int(wx_), int(wy_))
         p.end()
         self.setPixmap(canvas)
 

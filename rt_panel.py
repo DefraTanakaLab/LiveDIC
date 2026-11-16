@@ -44,6 +44,9 @@ SCALE_PRESETS = [("0 – 2 %", 0.0, 0.02), ("0 – 5 %", 0.0, 0.05),
 RATE_PRESETS = [("0 – 0.1 %/s", 0.0, 0.001), ("0 – 0.5 %/s", 0.0, 0.005),
                 ("0 – 1 %/s", 0.0, 0.01), ("0 – 5 %/s", 0.0, 0.05),
                 ("カスタム", None, None)]
+SUBSET_COLOR = "#ff3b30"
+# サブセット枠を描く点の割合。1/2 は市松、1/4 は 1 つおき、1/8 はその市松（いずれも等方的に散る）
+SUBSET_DENSITY = [("枠: 全点", 1), ("枠: 1/2", 2), ("枠: 1/4", 4), ("枠: 1/8", 8)]
 CMAPS = ["jet", "turbo", "viridis", "plasma"]
 RESOLUTIONS = [(1920, 1080), (3840, 2160), (1280, 720), (640, 480)]
 
@@ -477,10 +480,17 @@ class RTMapPanel(QWidget):
         row2.addWidget(self.lbl_roi)
         # サブセット・ステップがスペックルに対して適切かをプレビュー上で確かめるための表示
         self.chk_subset = QCheckBox("サブセット表示")
-        self.chk_subset.setToolTip("解析点（青い点）とサブセットの実寸（青い枠）をプレビューに重ねる。"
-                                   "スペックルがサブセット内に十分入っているか確認する。解析中は表示しない")
+        self.chk_subset.setToolTip("解析点とサブセットの実寸を重ねて表示する。"
+                                   "スペックルがサブセット内に十分入っているか確認する")
         self.chk_subset.toggled.connect(self._update_overlays)
         row2.addWidget(self.chk_subset)
+        self.cb_subset_den = QComboBox()
+        for name, _ in SUBSET_DENSITY:
+            self.cb_subset_den.addItem(name)
+        self.cb_subset_den.setToolTip("枠を描く点の割合。サブセットがステップより大きいと枠が重なって"
+                                      "画像が見えなくなるので、間引いて実寸を見る")
+        self.cb_subset_den.currentIndexChanged.connect(lambda _i: self._update_overlays())
+        row2.addWidget(self.cb_subset_den)
         row2.addSpacing(12)
         row2.addWidget(QLabel("探索 ±"))
         self.sp_r1 = QSpinBox(); self.sp_r1.setRange(1, 100); self.sp_r1.setValue(10); self.sp_r1.setFixedWidth(46)
@@ -692,7 +702,7 @@ class RTMapPanel(QWidget):
         store.add_many(
             rt_source=self.cb_source, rt_res=self.cb_res, rt_gpu=self.chk_gpu,
             rt_r1=self.sp_r1, rt_r2=self.sp_r2, rt_zncc=self.sp_zncc, rt_reref=self.sp_reref,
-            rt_subset_view=self.chk_subset,
+            rt_subset_view=self.chk_subset, rt_subset_den=self.cb_subset_den,
             rt_rate_win=self.sp_rate_win, rt_rate_smooth=self.chk_rate_smooth,
             rt_pos_follow=self.rb_pos_follow,
             rt_cmap=self.cb_cmap, rt_alpha=self.sl_alpha, rt_rot=self.cb_rot,
@@ -846,9 +856,7 @@ class RTMapPanel(QWidget):
             x1, y1, x2, y2 = self._roi
             self.canvas.add_overlay({"type": "rect", "x1": x1, "y1": y1, "x2": x2, "y2": y2,
                                      "color": "#ffaa00"})
-        # 解析中は出さない。ひずみマップのセルがグリッドそのものを示しているうえ、
-        # 数千点を毎フレーム描くと GUI が重くなる（設定を決めるためのものなのでプレビュー専用）
-        if not self.chk_subset.isChecked() or self._worker is not None:
+        if not self.chk_subset.isChecked():
             return
         shape = None
         if self._source is not None and self._source.shape is not None:
@@ -864,19 +872,22 @@ class RTMapPanel(QWidget):
             return
         if X.size == 0:
             return
-        xs, ys = X.ravel(), Y.ravel()
-        # 点が多いと描画が重いので間引く（間隔の見え方は変わらない）
-        stride = max(1, int(np.ceil(xs.size / 2000)))
-        self.canvas.add_overlay({"type": "grid",
-                                 "points": [(int(x), int(y)) for x, y in zip(xs[::stride], ys[::stride])]})
-        # サブセットの実寸は数点だけ枠で示す（全点に描くと潰れて見えない）
         ny, nx = X.shape
-        h = S // 2
-        picks = {(ny // 2, nx // 2), (0, 0), (0, nx - 1), (ny - 1, 0), (ny - 1, nx - 1)}
-        for iy, ix in picks:
-            cx, cy = int(X[iy, ix]), int(Y[iy, ix])
-            self.canvas.add_overlay({"type": "rect", "x1": cx - h, "y1": cy - h,
-                                     "x2": cx + h, "y2": cy + h, "color": "#4fc3f7"})
+        iy, ix = np.mgrid[0:ny, 0:nx]
+        den = SUBSET_DENSITY[self.cb_subset_den.currentIndex()][1]
+        if den == 2:
+            m = ((ix + iy) % 2 == 0)                              # 市松：ちょうど半分
+        elif den == 4:
+            m = (ix % 2 == 0) & (iy % 2 == 0)                     # 1 つおき
+        elif den == 8:
+            m = (ix % 2 == 0) & (iy % 2 == 0) & ((ix // 2 + iy // 2) % 2 == 0)   # 1/4 の市松
+        else:
+            m = np.ones_like(X, bool)
+        self.canvas.add_overlay({
+            "type": "subsets", "size": S, "color": SUBSET_COLOR,
+            "points": [(int(x), int(y)) for x, y in zip(X.ravel(), Y.ravel())],
+            "boxes": [(int(x), int(y)) for x, y in zip(X[m].ravel(), Y[m].ravel())],
+        })
 
     def _update_params_label(self):
         if not hasattr(self.host, "sp_subset"):
