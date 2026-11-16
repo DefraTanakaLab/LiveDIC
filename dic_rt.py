@@ -808,12 +808,69 @@ def strain_to_rgba(
         out[by0:by1, bx0:bx1] = big[by0 - y0:by1 - y0, bx0 - x0:bx1 - x0]
     if U is None or V is None:
         return out
-    return warp_by_displacement(out, U, V, X, Y)
+    return _fill_deformed_mesh(data, idx, finite, X, Y, U, V, img_shape, lut, alpha)
+
+
+def _fill_deformed_mesh(data, idx, finite, X, Y, U, V, img_shape, lut, alpha) -> np.ndarray:
+    """
+    各セルを「変位後の 4 隅」で四角形として塗る（前向き写像）。
+
+    以前は参照位置に描いた画像を `warp_by_displacement` で逆向きに写していたが、あれは
+    出力画素の位置で変位を引く近似なので、ひずみが大きいとセルの位置が実際の追従位置から
+    ずれる（サブセットの十字表示と合わなくなって発覚、2026-11-17）。こちらは各点の
+    追従位置 X+U をそのまま頂点に使うので十字と必ず一致し、セルの伸び・せん断もそのまま出る。
+    """
+    H, W = img_shape[:2]
+    ny, nx = data.shape
+    PX = (X + np.nan_to_num(U, nan=0.0)).astype(np.float32)
+    PY = (Y + np.nan_to_num(V, nan=0.0)).astype(np.float32)
+    # セルの角 = 隣接する点の中点。外周は線形外挿した仮想点で補う
+    def pad_extrap(P):
+        Q = np.empty((ny + 2, nx + 2), np.float32)
+        Q[1:-1, 1:-1] = P
+        Q[1:-1, 0] = 2 * P[:, 0] - P[:, min(1, nx - 1)]
+        Q[1:-1, -1] = 2 * P[:, -1] - P[:, max(nx - 2, 0)]
+        Q[0, :] = 2 * Q[1, :] - Q[min(2, ny), :]
+        Q[-1, :] = 2 * Q[-2, :] - Q[max(ny - 1, 0), :]
+        return Q
+    QX, QY = pad_extrap(PX), pad_extrap(PY)
+    cx = 0.25 * (QX[:-1, :-1] + QX[:-1, 1:] + QX[1:, :-1] + QX[1:, 1:])   # (ny+1, nx+1)
+    cy = 0.25 * (QY[:-1, :-1] + QY[:-1, 1:] + QY[1:, :-1] + QY[1:, 1:])
+    quads = np.stack([
+        np.stack([cx[:-1, :-1], cy[:-1, :-1]], -1), np.stack([cx[:-1, 1:], cy[:-1, 1:]], -1),
+        np.stack([cx[1:, 1:], cy[1:, 1:]], -1), np.stack([cx[1:, :-1], cy[1:, :-1]], -1),
+    ], axis=-2)                                                            # (ny, nx, 4, 2)
+    q = np.round(quads).astype(np.int32)
+    vis = finite & np.isfinite(U) & np.isfinite(V)
+    out = np.zeros((H, W, 4), np.uint8)
+    if not vis.any():
+        return out
+    # 塗るのは変形後の外接矩形だけにする（1080p 全面に fillPoly を色数ぶん掛けると 19 ms）
+    qs = q[vis]
+    x0 = max(0, int(qs[..., 0].min())); x1 = min(W, int(qs[..., 0].max()) + 1)
+    y0 = max(0, int(qs[..., 1].min())); y1 = min(H, int(qs[..., 1].max()) + 1)
+    if x1 <= x0 or y1 <= y0:
+        return out
+    sub_rgb = np.zeros((y1 - y0, x1 - x0, 3), np.uint8)
+    sub_mask = np.zeros((y1 - y0, x1 - x0), np.uint8)
+    off = np.array([x0, y0], np.int32)
+    # 色ごとにまとめて塗る（セル数によらず最大 256 回の fillPoly で済む）
+    for lvl in np.unique(idx[vis]):
+        polys = list(q[vis & (idx == lvl)] - off)
+        c = lut[lvl]
+        cv2.fillPoly(sub_rgb, polys, (int(c[0]), int(c[1]), int(c[2])))
+        cv2.fillPoly(sub_mask, polys, 255)
+    out[y0:y1, x0:x1, :3] = sub_rgb
+    out[y0:y1, x0:x1, 3] = np.where(sub_mask > 0, alpha, 0).astype(np.uint8)
+    return out
 
 
 def warp_by_displacement(rgba_ref: np.ndarray, U: np.ndarray, V: np.ndarray,
                          X: np.ndarray, Y: np.ndarray) -> np.ndarray:
     """
+    （2026-11-17 以降 `strain_to_rgba` は使わない。`_fill_deformed_mesh` に置き換え済み。
+      出力画素の位置で変位を引く近似のため、ひずみが大きいとセルが実際の追従位置からずれる）
+
     参照位置に描いた RGBA を、グリッドの変位 (U,V) で変形後の位置へ写す。
     出力画素 (x,y) の色 = 入力の (x - U(x,y), y - V(x,y))。変位場はグリッドから
     画像全体へ線形補間で広げる（変形後の位置で参照変位を引く近似。表示用途では十分）。

@@ -44,7 +44,10 @@ SCALE_PRESETS = [("0 – 2 %", 0.0, 0.02), ("0 – 5 %", 0.0, 0.05),
 RATE_PRESETS = [("0 – 0.1 %/s", 0.0, 0.001), ("0 – 0.5 %/s", 0.0, 0.005),
                 ("0 – 1 %/s", 0.0, 0.01), ("0 – 5 %/s", 0.0, 0.05),
                 ("カスタム", None, None)]
-SUBSET_COLOR = "#ff3b30"
+SUBSET_COLOR = "#ff3b30"          # 追従できている点
+SUBSET_LOST_COLOR = "#ffd54f"     # 見失った点
+SUBSET_RGB = (255, 59, 48)
+SUBSET_LOST_RGB = (255, 213, 79)
 # サブセット枠を描く点の割合。1/2 は市松、1/4 は 1 つおき、1/8 はその市松（いずれも等方的に散る）
 SUBSET_DENSITY = [("枠: 全点", 1), ("枠: 1/2", 2), ("枠: 1/4", 4), ("枠: 1/8", 8)]
 CMAPS = ["jet", "turbo", "viridis", "plasma"]
@@ -520,6 +523,14 @@ class RTMapPanel(QWidget):
 
         # ---- 行3：表示 ----
         row3 = QHBoxLayout()
+        # ひずみマップ自体の ON/OFF（サブセット表示と同じ扱い）。OFF にすると素の映像の上に
+        # 十字だけが出るので、追従の様子だけを見せられる
+        self.chk_map = QCheckBox("マップ表示")
+        self.chk_map.setChecked(True)
+        self.chk_map.setToolTip("ひずみマップの重ね描きを切り替える。OFF ならカメラ映像だけになる")
+        self.chk_map.toggled.connect(self._request_redraw)
+        row3.addWidget(self.chk_map)
+        row3.addSpacing(8)
         row3.addWidget(QLabel("成分:"))
         self._comp_bg = QButtonGroup(self)
         for i, key in enumerate(STRAIN_KEYS):
@@ -702,7 +713,7 @@ class RTMapPanel(QWidget):
         store.add_many(
             rt_source=self.cb_source, rt_res=self.cb_res, rt_gpu=self.chk_gpu,
             rt_r1=self.sp_r1, rt_r2=self.sp_r2, rt_zncc=self.sp_zncc, rt_reref=self.sp_reref,
-            rt_subset_view=self.chk_subset, rt_subset_den=self.cb_subset_den,
+            rt_subset_view=self.chk_subset, rt_subset_den=self.cb_subset_den, rt_map_view=self.chk_map,
             rt_rate_win=self.sp_rate_win, rt_rate_smooth=self.chk_rate_smooth,
             rt_pos_follow=self.rb_pos_follow,
             rt_cmap=self.cb_cmap, rt_alpha=self.sl_alpha, rt_rot=self.cb_rot,
@@ -849,45 +860,107 @@ class RTMapPanel(QWidget):
     def _draw_roi_overlay(self):
         self._update_overlays()
 
-    def _update_overlays(self):
-        """ROI 枠と、「サブセット表示」ON ならグリッド点＋サブセット枠を重ねる。"""
+    def _density_mask(self, shape) -> np.ndarray:
+        """枠を描く点のマスク。いずれも ROI 全体に等方的に散るように選ぶ。"""
+        ny, nx = shape
+        iy, ix = np.mgrid[0:ny, 0:nx]
+        den = SUBSET_DENSITY[self.cb_subset_den.currentIndex()][1]
+        if den == 2:
+            return (ix + iy) % 2 == 0                               # 市松：ちょうど半分
+        if den == 4:
+            return (ix % 2 == 0) & (iy % 2 == 0)                    # 1 つおき
+        if den == 8:
+            return (ix % 2 == 0) & (iy % 2 == 0) & ((ix // 2 + iy // 2) % 2 == 0)
+        return np.ones((ny, nx), bool)
+
+    def _mark_arm(self, S: int) -> float:
+        """
+        十字の腕の長さ [画像 px]。
+
+        サブセットの実寸（S/2）を出したいが、ステップが小さい設定では隣の十字と重なって
+        一面の網目になる（subset 31 / step 10 で実際にそうなった）。描く点どうしの最小間隔の
+        4 割を上限にして、どの設定でも十字が離れて見えるようにする。
+        """
+        step = max(1, self.host.sp_step.value())
+        den = SUBSET_DENSITY[self.cb_subset_den.currentIndex()][1]
+        gap = {1: step, 2: step * 1.414, 4: step * 2.0, 8: step * 2.828}[den]
+        return max(2.0, min(S / 2.0, 0.4 * gap))
+
+    def _subset_overlay(self, PX: np.ndarray, PY: np.ndarray, S: int,
+                        good: Optional[np.ndarray] = None) -> dict:
+        """
+        キャンバス用のオーバーレイ 1 件。**表示倍率で描かせる**ためにデータだけ渡す。
+        画像に焼き込んでから縮小すると 1px の線が潰れて網目になるため。
+        """
+        m = self._density_mask(PX.shape)
+        fin = np.isfinite(PX) & np.isfinite(PY)
+        g = fin if good is None else (fin & good)
+
+        def pack(sel):
+            return [(int(x), int(y)) for x, y in zip(PX[sel].ravel(), PY[sel].ravel())]
+        return {"type": "subsets", "arm": self._mark_arm(S), "color": SUBSET_COLOR,
+                "points": pack(g), "marks": pack(m & g),
+                "lost_points": pack(fin & ~g), "lost_marks": pack(m & fin & ~g),
+                "lost_color": SUBSET_LOST_COLOR}
+
+    def _draw_marks_on(self, rgb: np.ndarray, PX: np.ndarray, PY: np.ndarray,
+                       S: int, good: Optional[np.ndarray] = None) -> None:
+        """
+        サブセットの十字を画像そのものに焼き込む（in-place）。
+
+        **別ウィンドウと録画用のみ**。どちらも原寸に近い大きさで見るので線が潰れない。
+        タブ内のキャンバスは縮小表示なので `_subset_overlay` を使う。
+        """
+        h, w = rgb.shape[:2]
+        m = self._density_mask(PX.shape)
+        fin = np.isfinite(PX) & np.isfinite(PY)
+        g = fin if good is None else (fin & good)
+        half = max(1, int(round(self._mark_arm(S))))
+        # 縮小表示されても線が消えないよう、画像サイズに比例した太さにする
+        # （1080p で 2px。0.5 倍に縮小しても 1px 残る。4K なら 4px）
+        thick = max(2, int(round(min(h, w) / 540.0)))
+        for sel, col in ((m & g, SUBSET_RGB), (m & fin & ~g, SUBSET_LOST_RGB)):
+            if not sel.any():
+                continue
+            x = np.clip(PX[sel], -1e4, 1e4).astype(np.int32)
+            y = np.clip(PY[sel], -1e4, 1e4).astype(np.int32)
+            segs = np.empty((2 * x.size, 2, 2), np.int32)
+            segs[0::2, 0, 0] = x - half; segs[0::2, 0, 1] = y        # 横棒
+            segs[0::2, 1, 0] = x + half; segs[0::2, 1, 1] = y
+            segs[1::2, 0, 0] = x; segs[1::2, 0, 1] = y - half        # 縦棒
+            segs[1::2, 1, 0] = x; segs[1::2, 1, 1] = y + half
+            cv2.polylines(rgb, segs, False, col, thick, cv2.LINE_8)
+        # 解析点そのものは全点を 1px の点で（十字を間引いても点の密度が分かる）
+        px = PX[g]; py = PY[g]
+        if px.size:
+            xi = np.clip(px.astype(np.int32), 0, w - 1)
+            yi = np.clip(py.astype(np.int32), 0, h - 1)
+            rgb[yi, xi] = SUBSET_RGB
+
+    def _preview_grid(self, shape):
+        """プレビュー時に十字を描くグリッド（解析前なので参照位置そのもの）。"""
+        try:
+            X, Y = dic_core.create_grid(shape, self.host.sp_subset.value() | 1,
+                                        self.sp_r1.value(), self.host.sp_step.value(), self._roi)
+        except Exception:
+            return None, None
+        if X.size == 0:
+            return None, None
+        return X.astype(np.float64), Y.astype(np.float64)
+
+    def _reset_canvas_overlays(self):
+        """キャンバスのオーバーレイを ROI 枠だけに戻す（十字はこの後に積む）。"""
         self.canvas.clear_overlays()
         if self._roi:
             x1, y1, x2, y2 = self._roi
             self.canvas.add_overlay({"type": "rect", "x1": x1, "y1": y1, "x2": x2, "y2": y2,
                                      "color": "#ffaa00"})
-        if not self.chk_subset.isChecked():
-            return
-        shape = None
-        if self._source is not None and self._source.shape is not None:
-            shape = self._source.shape
-        elif self._ref_gray is not None:
-            shape = self._ref_gray.shape
-        if shape is None:
-            return
-        try:
-            S = self.host.sp_subset.value() | 1
-            X, Y = dic_core.create_grid(shape, S, self.sp_r1.value(), self.host.sp_step.value(), self._roi)
-        except Exception:
-            return
-        if X.size == 0:
-            return
-        ny, nx = X.shape
-        iy, ix = np.mgrid[0:ny, 0:nx]
-        den = SUBSET_DENSITY[self.cb_subset_den.currentIndex()][1]
-        if den == 2:
-            m = ((ix + iy) % 2 == 0)                              # 市松：ちょうど半分
-        elif den == 4:
-            m = (ix % 2 == 0) & (iy % 2 == 0)                     # 1 つおき
-        elif den == 8:
-            m = (ix % 2 == 0) & (iy % 2 == 0) & ((ix // 2 + iy // 2) % 2 == 0)   # 1/4 の市松
-        else:
-            m = np.ones_like(X, bool)
-        self.canvas.add_overlay({
-            "type": "subsets", "size": S, "color": SUBSET_COLOR,
-            "points": [(int(x), int(y)) for x, y in zip(X.ravel(), Y.ravel())],
-            "boxes": [(int(x), int(y)) for x, y in zip(X[m].ravel(), Y[m].ravel())],
-        })
+
+    def _update_overlays(self):
+        """設定が変わったときに呼ぶ。次の描画で十字を引き直させる。"""
+        self._reset_canvas_overlays()
+        self._latest_drawn_fid = -1
+        self._preview_fid = -1
 
     def _update_params_label(self):
         if not hasattr(self.host, "sp_subset"):
@@ -1036,13 +1109,26 @@ class RTMapPanel(QWidget):
                 self._ext.hide()
             self.cb_rot.setEnabled(False)
 
-    def _show_rgb(self, rgb: np.ndarray, t: Optional[float] = None):
-        """タブ内キャンバスに表示し、別ウィンドウと記録にも同じ画像を送る。"""
+    def _show_rgb(self, rgb: np.ndarray, t: Optional[float] = None, marks: Optional[tuple] = None):
+        """
+        タブ内キャンバスに表示し、別ウィンドウと記録にも送る。
+
+        タブ内は縮小表示なので十字をキャンバスのオーバーレイ（表示倍率で描画）に任せ、
+        別ウィンドウと録画へは十字を焼き込んだ画像を渡す。
+        """
         self.canvas.set_image(rgb_to_qpixmap(rgb))
-        if self._ext is not None and self._ext.isVisible():
-            self._ext.set_frame(rgb)
-        if self._rec is not None and t is not None:
-            self._rec.add_display(rgb, t)      # 書き込みは別スレッド（呼び出しは軽い）
+        need_ext = self._ext is not None and self._ext.isVisible()
+        need_rec = self._rec is not None and t is not None
+        if not (need_ext or need_rec):
+            return
+        out = rgb
+        if marks is not None:
+            out = rgb.copy()
+            self._draw_marks_on(out, *marks)
+        if need_ext:
+            self._ext.set_frame(out)
+        if need_rec:
+            self._rec.add_display(out, t)      # 書き込みは別スレッド（呼び出しは軽い）
 
     def _set_status(self, text: str):
         self.lbl_status.setText(text)
@@ -1090,7 +1176,7 @@ class RTMapPanel(QWidget):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_mark.setEnabled(True)
-        self._update_overlays()       # 解析中はグリッド表示を消す（ROI 枠は残す）
+        self._update_overlays()       # 次の描画で追従位置の十字に切り替える
         for wdg in (self.btn_roi, self.btn_roi_clear, self.sp_r1, self.sp_r2,
                     self.sp_zncc, self.sp_reref, self.chk_gpu, self.btn_scan,
                     self.cb_source, self.cb_res, self.sp_rate_win, self.chk_rate_smooth, self.host.chk_icgn):
@@ -1231,7 +1317,15 @@ class RTMapPanel(QWidget):
             self._preview_fid = fr[0]
             if self._preview_fid % 2:      # プレビューは約15fpsで十分
                 return
-            self._show_rgb(cv2.cvtColor(fr[2], cv2.COLOR_GRAY2RGB))
+            rgb = cv2.cvtColor(fr[2], cv2.COLOR_GRAY2RGB)
+            marks = None
+            if self.chk_subset.isChecked():
+                gx, gy = self._preview_grid(fr[2].shape)
+                if gx is not None:
+                    marks = (gx, gy, self.host.sp_subset.value() | 1, None)
+                    self._reset_canvas_overlays()
+                    self.canvas.add_overlay(self._subset_overlay(*marks))
+            self._show_rgb(rgb, None, marks)
             if self._source.shape is not None and self.lbl_params.text().startswith("subset=") \
                     and "点" not in self.lbl_params.text():
                 self._update_params_label()
@@ -1243,13 +1337,23 @@ class RTMapPanel(QWidget):
         vmin, vmax = self._scale()
         alpha = int(self.sl_alpha.value() * 2.55)
         rgba = None
-        if data is not None:
+        if data is not None and self.chk_map.isChecked():
             follow = self.rb_pos_follow.isChecked() and res.get("U") is not None
             rgba = dic_rt.strain_to_rgba(data, vmin, vmax, res["X"], res["Y"], gray.shape, self._lut, alpha,
                                          U=res.get("U_draw", res["U"]) if follow else None,
                                          V=res.get("V_draw", res["V"]) if follow else None)
         rgb = dic_rt.compose_overlay(gray, rgba)
-        self._show_rgb(rgb, t)
+        marks = None
+        if self.chk_subset.isChecked():
+            # トラッキングの様子を見るためのものなので、参照位置ではなく**追従後の位置**に描く。
+            # 見失った点は直近の追従位置（U_draw）に別色で残すので、どこで外れたかが分かる
+            U = res.get("U_draw", res["U"]); V = res.get("V_draw", res["V"])
+            S = self.host.sp_subset.value() | 1
+            good = np.isfinite(res["U"]) & np.isfinite(res["V"])
+            marks = (res["X"] + U, res["Y"] + V, S, good)
+            self._reset_canvas_overlays()
+            self.canvas.add_overlay(self._subset_overlay(*marks))
+        self._show_rgb(rgb, t, marks)
 
 
 class _ScanThread(QThread):
