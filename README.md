@@ -34,24 +34,53 @@
 
 ---
 
-## ダウンロード・使い方
+## インストールと起動
 
-👉 **[Releases](https://github.com/DefraTanakaLab/LiveDIC/releases)** から最新の `LiveDIC_win64.zip` をダウンロードしてください。
+> **動作環境**: Windows 10/11 64bit（Python 3.10 以降。開発・動作確認は 3.13）
 
-1. zipを解凍する
-2. `LiveDIC.exe` をダブルクリックして起動
-3. インストール不要・Python不要
+### 1. Python を入れる（初回のみ）
 
-> **動作環境**: Windows 10/11 64bit
+[python.org](https://www.python.org/downloads/) から Python をダウンロードし、インストーラの
+**「Add Python to PATH」に必ずチェック**を入れてから Install。
+
+### 2. このプログラムを置く（初回のみ）
+
+ページ上部の緑の **Code → Download ZIP** で落として展開するか、git があれば:
+
+```bash
+git clone https://github.com/DefraTanakaLab/LiveDIC.git C:\tools\LiveDIC
+```
+
+> パスに日本語やスペースが含まれると誤動作することがあります。`C:\tools\LiveDIC` のような
+> 単純な場所に置いてください。OneDrive と同期するフォルダも避けてください。
+
+### 3. 必要なライブラリを入れる（初回のみ）
+
+コマンドプロンプトで:
+
+```bash
+pip install -r C:\tools\LiveDIC\requirements.txt
+```
+
+### 4. 起動する（毎回）
+
+```bash
+cd C:\tools\LiveDIC
+python main.py
+```
+
+### 更新する
+
+```bash
+cd C:\tools\LiveDIC
+git pull
+```
+
+（ZIP で入れた場合は、新しい ZIP を落として中身を上書きしてください）
 
 ---
 
-## ソースから実行する場合
-
-```bash
-pip install -r requirements.txt
-python main.py
-```
+## GPU で動かす場合（任意）
 
 リアルタイムマップを GPU で動かす場合（NVIDIA GPU、ドライバは CUDA 12 以降対応のもの）:
 
@@ -95,12 +124,16 @@ print(np.nanmax(e["exx"]) * 100, "%")
 
 ---
 
-## exeをビルドする場合
+## exe をビルドする場合（開発者向け）
 
 ```bash
 python make_icon.py   # アイコン更新時のみ
 build.bat
 ```
+
+出来上がった exe は Python 不要で動きますが、**GPU は使えません**（CuPy は 800 MB 級なので
+同梱していない）。また未署名のため、Windows のスマート アプリ コントロールが有効な環境では
+起動がブロックされます。配布するならソースのまま渡すほうが確実です。
 
 ---
 
