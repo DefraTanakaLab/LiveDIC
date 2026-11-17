@@ -120,7 +120,6 @@ build.bat
 | `build.bat` | PyInstaller exeビルドスクリプト |
 | `make_icon.py` | アイコン生成スクリプト |
 | `requirements.txt` | 依存パッケージ |
-| `Demo_2points_mode/` | 2点間モード用デモ画像 |
 | `Demo_map_mode/` | マップモード用デモ画像 |
 
 ---

@@ -15,3 +15,7 @@ LiveDIC.ico
 # Claude
 .claude/
 
+# 2点間モードのデモ画像（91 MB）。リポジトリ公開の検討にあたり追跡から外した。
+# 手元には残っているので動作確認には使える
+Demo_2points_mode/
+
